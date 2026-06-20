@@ -11,12 +11,31 @@
 //   -  / =          - volume down / up (step 16, 0..255)
 //   1 2 3 4         - waveform: Sine / Saw / Square / Tri
 //   IMU (gyro)      - tilt gx → amp scale, gy → vol, gz → release time
+//
+// Build envs:
+//   synth             — standalone audio only
+//   synth-usb-midi    — audio + USB MIDI (SYNTH_USB_MIDI=1)
+//   synth-ble-midi    — audio + BLE MIDI (SYNTH_BLE_MIDI=1, device "Cardputer Synth")
 #include "cardputer_hw.h"
 #include "notes.h"
 #include "adsr.h"
 #include "oscillator.h"
 #include "imu_map.h"
 #include <cmath>
+
+// --- USB MIDI ---
+#ifdef SYNTH_USB_MIDI
+#include "USB.h"
+#include "USBMIDI.h"
+static USBMIDI_Device usbMidi;
+#endif
+
+// --- BLE MIDI ---
+#ifdef SYNTH_BLE_MIDI
+#include <BLEMIDI_Transport.h>
+#include <hardware/BLEMIDI_ESP32.h>
+BLEMIDI_CREATE_INSTANCE("Cardputer Synth", MIDI)
+#endif
 
 static constexpr uint32_t SR    = 16000;  // sample rate (matches recorder)
 static constexpr size_t   CHUNK = 256;    // samples per streamed block (~16ms)
@@ -34,6 +53,11 @@ static synth::WaveShape g_wave = synth::WaveShape::Sine;
 static synth::ImuCalib g_calib;
 static float           g_ampScale = 1.0f;  // gyro gx → amplitude multiplier
 
+// MIDI CC last-sent tracking — only transmit on change (prevents CC floods).
+#if defined(SYNTH_USB_MIDI) || defined(SYNTH_BLE_MIDI)
+static uint8_t g_cc1_last = 0xFF, g_cc7_last = 0xFF, g_cc11_last = 0xFF;
+#endif
+
 // Voice state — monophonic. Phase runs continuously across chunks (no per-chunk
 // reset) so sustained tones don't click.
 static synth::Adsr g_env;
@@ -49,6 +73,12 @@ static void redraw(const char* lastNote) {
   M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\namp:  %.2f",
                     g_octave, g_vol, lastNote,
                     synth::shapeName(g_wave), g_ampScale);
+#ifdef SYNTH_USB_MIDI
+  M5.Display.printf("\nUSB MIDI");
+#endif
+#ifdef SYNTH_BLE_MIDI
+  M5.Display.printf("\nBLE MIDI");
+#endif
 }
 
 // Start (or retrigger) the voice on a semitone in the current octave.
@@ -78,8 +108,15 @@ static bool heldContains(const std::vector<char>& held, char c) {
 
 void setup() {
   cardputer::begin();
+#ifdef SYNTH_USB_MIDI
+  USB.begin();
+  usbMidi.begin();
+#endif
   M5.Speaker.begin();
   cardputer::volume(g_vol);
+#ifdef SYNTH_BLE_MIDI
+  MIDI.begin(MIDI_CHANNEL_OMNI);
+#endif
   // Calibrate IMU: snapshot at startup while device is still.
   {
     cardputer::Imu raw;
@@ -91,6 +128,12 @@ void setup() {
 }
 
 void loop() {
+#ifdef SYNTH_USB_MIDI
+  usbMidi.read();
+#endif
+#ifdef SYNTH_BLE_MIDI
+  MIDI.read();
+#endif
   cardputer::update();
 
   // --- note edges: a fresh press (re)triggers the voice (last-note priority) ---
@@ -99,6 +142,13 @@ void loop() {
     if (s >= 0) {
       noteOn(s);
       g_gateKey = c;
+      int midiNote = synth::noteToMidi(s, g_octave);
+#ifdef SYNTH_USB_MIDI
+      usbMidi.sendNoteOn(midiNote, 100, 1);
+#endif
+#ifdef SYNTH_BLE_MIDI
+      MIDI.sendNoteOn(midiNote, 100, 1);
+#endif
       char label[8];
       snprintf(label, sizeof(label), "%s%d", synth::semitoneName(s), g_octave);
       redraw(label);
@@ -131,7 +181,14 @@ void loop() {
 
   // --- gate release: the held note key let go -> enter release tail ---
   if (g_gateKey && !heldContains(cardputer::keysHeld(), g_gateKey)) {
+    int midiNote = synth::noteToMidi(synth::keyToSemitone(g_gateKey), g_octave);
     g_env.gateOff();
+#ifdef SYNTH_USB_MIDI
+    usbMidi.sendNoteOff(midiNote, 0, 1);
+#endif
+#ifdef SYNTH_BLE_MIDI
+    MIDI.sendNoteOff(midiNote, 0, 1);
+#endif
     g_gateKey = 0;
   }
 
@@ -146,6 +203,25 @@ void loop() {
       g_ampScale = r.ampScale;
       if (r.vol != g_vol) { g_vol = r.vol; cardputer::volume(g_vol); }
       g_env.configMs(SR, 8.0, 40.0, 0.7, r.releaseMs);
+#if defined(SYNTH_USB_MIDI) || defined(SYNTH_BLE_MIDI)
+      // CC flood guard: only transmit when value changes.
+      uint8_t cc1  = (uint8_t)((r.ampScale - 0.2f) / 0.8f * 127.0f);
+      uint8_t cc7  = (uint8_t)(r.vol / 2);
+      uint8_t cc11 = (uint8_t)((r.releaseMs - 50.0f) / 450.0f * 127.0f);
+      if (cc1 != g_cc1_last || cc7 != g_cc7_last || cc11 != g_cc11_last) {
+        g_cc1_last = cc1; g_cc7_last = cc7; g_cc11_last = cc11;
+#ifdef SYNTH_USB_MIDI
+        usbMidi.sendControlChange(1,  cc1,  1);
+        usbMidi.sendControlChange(7,  cc7,  1);
+        usbMidi.sendControlChange(11, cc11, 1);
+#endif
+#ifdef SYNTH_BLE_MIDI
+        MIDI.sendControlChange(1,  cc1,  1);
+        MIDI.sendControlChange(7,  cc7,  1);
+        MIDI.sendControlChange(11, cc11, 1);
+#endif
+      }
+#endif
     }
   }
 
