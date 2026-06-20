@@ -1,36 +1,36 @@
-// Synth — keyboard-driven tone generator on the Cardputer ADV. Press a note key
-// (tracker layout, see notes.h) -> synthesize a short sine burst and play it out
-// the 1W speaker via M5.Speaker.playRaw().
+// Synth — keyboard-driven tone generator on the Cardputer ADV. Hold a note key
+// and the tone sustains with an ADSR envelope; release it and the tone fades on
+// the release tail. Monophonic, last-note priority. Audio is streamed to the 1W
+// speaker in small chunks via M5.Speaker.playRaw(); the ADSR + gate math lives in
+// adsr.h (host-tested), note math in notes.h.
 //
 // Controls (Fn + key to wake keyboard):
 //   z x c v b n m  - white keys C D E F G A B (current octave)
-//   s d g h j       - black keys C# D# F# G# A#
+//   s d g h j       - black keys C# D# F# G# A#  (hold to sustain)
 //   [  / ]          - octave down / up (clamp 1..7); also ; / ' as fallback
 //   -  / =          - volume down / up (step 16, 0..255)
 #include "cardputer_hw.h"
 #include "notes.h"
+#include "adsr.h"
+#include <cmath>
 
-static constexpr uint32_t SR  = 16000;   // sample rate (matches recorder)
-static constexpr int      MS  = 120;     // tone length, milliseconds
-static constexpr size_t   N   = SR * MS / 1000;   // samples per burst
+static constexpr uint32_t SR    = 16000;  // sample rate (matches recorder)
+static constexpr size_t   CHUNK = 256;    // samples per streamed block (~16ms)
+static constexpr int      AMP   = 28000;  // full-scale amplitude, headroom < int16 max
 
-static int16_t g_buf[N];
+static int16_t g_buf[CHUNK];
 
-static int     g_octave = 4;             // base octave, clamp 1..7
-static uint8_t g_vol     = 128;          // 0..255
+static int     g_octave = 4;              // base octave, clamp 1..7
+static uint8_t g_vol    = 128;            // 0..255 (speaker output)
 
-// Fill g_buf with a sine at hz, with a short linear fade in/out to kill clicks.
-static void fillSine(double hz) {
-  const double twoPiF = 2.0 * 3.14159265358979323846 * hz / SR;
-  const size_t fade = SR / 200;          // ~5ms ramp each end
-  for (size_t i = 0; i < N; i++) {
-    double s = sin(twoPiF * i);
-    double env = 1.0;
-    if (i < fade)        env = (double)i / fade;
-    else if (i > N - fade) env = (double)(N - i) / fade;
-    g_buf[i] = (int16_t)(s * env * 28000);   // headroom below int16 max
-  }
-}
+// Voice state — monophonic. Phase runs continuously across chunks (no per-chunk
+// reset) so sustained tones don't click.
+static synth::Adsr g_env;
+static double      g_phaseInc = 0.0;      // radians per sample for current note
+static double      g_phase    = 0.0;      // running oscillator phase
+static char        g_gateKey  = 0;        // note key currently held, 0 = none
+
+// TWO_PI comes from Arduino.h (6.283185...).
 
 static void redraw(const char* lastNote) {
   M5.Display.fillScreen(TFT_BLACK);
@@ -38,26 +38,49 @@ static void redraw(const char* lastNote) {
   M5.Display.printf("SYNTH\noct %d  vol %d\n\nlast: %s", g_octave, g_vol, lastNote);
 }
 
-static void playKey(int semitone) {
-  int midi = synth::noteToMidi(semitone, g_octave);
-  fillSine(synth::midiToHz(midi));
-  M5.Speaker.playRaw(g_buf, N, SR);
-  // non-blocking: let it ring while loop keeps polling keys
+// Start (or retrigger) the voice on a semitone in the current octave.
+static void noteOn(int semitone) {
+  int midi   = synth::noteToMidi(semitone, g_octave);
+  g_phaseInc = TWO_PI * synth::midiToHz(midi) / SR;
+  g_env.gateOn();
+}
+
+// Render one CHUNK of the sustained voice into g_buf and queue it. Phase and
+// envelope advance per sample; envelope shapes amplitude (attack/decay/sustain/
+// release). Returns once the chunk is queued.
+static void renderChunk() {
+  for (size_t i = 0; i < CHUNK; i++) {
+    double amp = g_env.step();
+    g_buf[i] = (int16_t)(sin(g_phase) * amp * AMP);
+    g_phase += g_phaseInc;
+    if (g_phase >= TWO_PI) g_phase -= TWO_PI;
+  }
+  M5.Speaker.playRaw(g_buf, CHUNK, SR, false, 1, 0);   // channel 0, no repeat
+}
+
+static bool heldContains(const std::vector<char>& held, char c) {
+  for (char h : held) if (h == c) return true;
+  return false;
 }
 
 void setup() {
   cardputer::begin();
   M5.Speaker.begin();
   cardputer::volume(g_vol);
+  // Snappy organ-ish default: 8ms attack, 40ms decay, hold at 0.7, 120ms release.
+  g_env.configMs(SR, 8.0, 40.0, 0.7, 120.0);
   redraw("-");
 }
 
 void loop() {
   cardputer::update();
+
+  // --- note edges: a fresh press (re)triggers the voice (last-note priority) ---
   for (char c : cardputer::keysJustPressed()) {
     int s = synth::keyToSemitone(c);
     if (s >= 0) {
-      playKey(s);
+      noteOn(s);
+      g_gateKey = c;
       char label[8];
       snprintf(label, sizeof(label), "%s%d", synth::semitoneName(s), g_octave);
       redraw(label);
@@ -82,5 +105,17 @@ void loop() {
       redraw("-");
     }
   }
-  delay(2);
+
+  // --- gate release: the held note key let go -> enter release tail ---
+  if (g_gateKey && !heldContains(cardputer::keysHeld(), g_gateKey)) {
+    g_env.gateOff();
+    g_gateKey = 0;
+  }
+
+  // --- keep the speaker fed while the voice is sounding (incl. release tail) ---
+  while (g_env.active() && M5.Speaker.isPlaying(0) < 2) {
+    renderChunk();
+  }
+
+  delay(1);
 }

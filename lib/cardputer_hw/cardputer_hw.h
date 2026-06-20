@@ -24,6 +24,9 @@ void update();
 bool keyPressed();
 // Characters entered since last update() (already de-bounced by M5).
 std::vector<char> keysJustPressed();
+// Characters currently held down this frame (gate state, no edge filter).
+// Use with keysJustPressed() for press/release tracking (e.g. synth sustain).
+std::vector<char> keysHeld();
 // Convenience: blocking line input rendered to screen. Returns on Enter.
 String readLine(const String& prompt = "");
 

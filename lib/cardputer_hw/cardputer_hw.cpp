@@ -29,6 +29,13 @@ std::vector<char> keysJustPressed() {
   return out;
 }
 
+std::vector<char> keysHeld() {
+  std::vector<char> out;
+  auto status = M5Cardputer.Keyboard.keysState();   // current matrix, every frame
+  for (auto c : status.word) out.push_back(c);
+  return out;
+}
+
 String readLine(const String& prompt) {
   String buf;
   M5.Display.fillScreen(TFT_BLACK);
