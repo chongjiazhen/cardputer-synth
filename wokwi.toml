@@ -1,0 +1,4 @@
+[wokwi]
+version = 1
+firmware = '.pio/build/synth/firmware.bin'
+elf = '.pio/build/synth/firmware.elf'
