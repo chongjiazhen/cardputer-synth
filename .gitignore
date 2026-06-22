@@ -1,0 +1,15 @@
+# PlatformIO
+.pio/
+.vscode/
+*.bin
+!bin/*.bin
+
+# build / OS junk
+*.elf
+*.map
+.DS_Store
+Thumbs.db
+
+# secrets
+secrets.h
+*.local.h
