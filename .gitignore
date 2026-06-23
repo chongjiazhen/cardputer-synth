@@ -13,3 +13,6 @@ Thumbs.db
 # secrets
 secrets.h
 *.local.h
+
+# AI harness local notes — machine-local, never ships public
+CLAUDE.local.md
