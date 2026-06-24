@@ -8,9 +8,10 @@ output.
 
 - **Waveforms:** sine / saw / square / triangle (keys `1`–`4`)
 - **ADSR envelope** with key-held sustain
-- **IMU expression** — tilt maps to amplitude (graceful no-op if IMU absent)
+- **IMU expression** — gyro rotation maps to amplitude (gx), volume (gy), and
+  pitch bend ±2 semitones (gz, self-centering); graceful no-op if IMU absent
 - **MIDI out** — USB-MIDI and BLE-MIDI (device name "Cardputer Synth"); sends
-  note on/off + CC 1/7/11 from tilt expression
+  note on/off + CC 1 (mod) / CC 7 (volume) / pitch-bend from gyro expression
 
 ## Build
 
@@ -37,6 +38,9 @@ upload `firmware.bin` + `diagram.json` to https://wokwi.com.
 display + keyboard and proves the firmware boots, but it does **not** emulate
 audio, MIDI, or the IMU. The board model is the classic Cardputer, not the ADV,
 so the key map is not 1:1. To actually hear the synth, flash real hardware.
+
+To verify audio / IMU / MIDI on a physical Cardputer ADV, follow
+[docs/hardware-verification.md](docs/hardware-verification.md).
 
 ## Host tests
 
