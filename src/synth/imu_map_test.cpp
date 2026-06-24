@@ -16,12 +16,12 @@ static bool near(float a, float b, float tol = 1.0f) {
 int main() {
   using namespace synth;
 
-  // --- center (0,0,0): ampScale≈0.6, vol≈128, releaseMs≈275 ---
+  // --- center (0,0,0): ampScale≈0.6, vol≈128, pitchBend≈0 ---
   {
     auto r = mapImu(0, 0, 0);
-    check(near(r.ampScale, 0.6f, 0.01f), "center ampScale");
-    check(r.vol == 128,                  "center vol");
-    check(near(r.releaseMs, 275.0f),     "center releaseMs");
+    check(near(r.ampScale, 0.6f, 0.01f),     "center ampScale");
+    check(r.vol == 128,                      "center vol");
+    check(near(r.pitchBend, 0.0f, 0.001f),   "center pitchBend");
   }
 
   // --- gx = +IMU_RANGE → ampScale≈1.0 ---
@@ -48,25 +48,25 @@ int main() {
     check(r.vol == 0, "gy- vol");
   }
 
-  // --- gz = +IMU_RANGE → releaseMs≈500 ---
+  // --- gz = +IMU_RANGE → pitchBend≈+IMU_BEND_SEMITONES ---
   {
     auto r = mapImu(0, 0, IMU_RANGE);
-    check(near(r.releaseMs, 500.0f), "gz+ release");
+    check(near(r.pitchBend, IMU_BEND_SEMITONES, 0.001f), "gz+ pitchBend");
   }
 
-  // --- gz = -IMU_RANGE → releaseMs≈50 ---
+  // --- gz = -IMU_RANGE → pitchBend≈-IMU_BEND_SEMITONES ---
   {
     auto r = mapImu(0, 0, -IMU_RANGE);
-    check(near(r.releaseMs, 50.0f), "gz- release");
+    check(near(r.pitchBend, -IMU_BEND_SEMITONES, 0.001f), "gz- pitchBend");
   }
 
   // --- dead zone: (1,1,1) all within ±IMU_DEAD → same as (0,0,0) ---
   {
     auto r0 = mapImu(0, 0, 0);
     auto rd = mapImu(1.0f, 1.0f, 1.0f);
-    check(near(rd.ampScale,  r0.ampScale,  0.01f), "deadzone ampScale");
-    check(rd.vol       == r0.vol,                  "deadzone vol");
-    check(near(rd.releaseMs, r0.releaseMs, 0.5f),  "deadzone releaseMs");
+    check(near(rd.ampScale,  r0.ampScale,  0.01f),  "deadzone ampScale");
+    check(rd.vol       == r0.vol,                   "deadzone vol");
+    check(near(rd.pitchBend, r0.pitchBend, 0.001f), "deadzone pitchBend");
   }
 
   // --- calibrate: offsets stored ---

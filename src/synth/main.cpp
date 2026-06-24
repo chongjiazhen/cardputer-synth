@@ -10,7 +10,8 @@
 //   [  / ]          - octave down / up (clamp 1..7); also ; / ' as fallback
 //   -  / =          - volume down / up (step 16, 0..255)
 //   1 2 3 4         - waveform: Sine / Saw / Square / Tri
-//   IMU (gyro)      - tilt gx → amp scale, gy → vol, gz → release time
+//   IMU (gyro)      - rotate gx → amp scale, gy → vol, gz → pitch bend (±2
+//                     semitones, self-centering spring-loaded wheel)
 //
 // Build envs:
 //   synth             — standalone audio only
@@ -51,11 +52,14 @@ static synth::WaveShape g_wave = synth::WaveShape::Sine;
 
 // IMU state
 static synth::ImuCalib g_calib;
-static float           g_ampScale = 1.0f;  // gyro gx → amplitude multiplier
+static float           g_ampScale  = 1.0f;  // gyro gx → amplitude multiplier
+static double          g_bendRatio = 1.0;   // gyro gz → pitch-bend freq ratio
 
-// MIDI CC last-sent tracking — only transmit on change (prevents CC floods).
+// MIDI last-sent tracking — only transmit on change (prevents controller floods).
+// gx→CC1 (mod), gy→CC7 (vol), gz→pitch bend (14-bit, center 0).
 #if defined(SYNTH_USB_MIDI) || defined(SYNTH_BLE_MIDI)
-static uint8_t g_cc1_last = 0xFF, g_cc7_last = 0xFF, g_cc11_last = 0xFF;
+static uint8_t g_cc1_last = 0xFF, g_cc7_last = 0xFF;
+static int     g_pb_last  = 0x7FFFFFFF;     // sentinel: force first send
 #endif
 
 // Voice state — monophonic. Phase runs continuously across chunks (no per-chunk
@@ -95,7 +99,7 @@ static void renderChunk() {
   for (size_t i = 0; i < CHUNK; i++) {
     double amp = g_env.step();
     g_buf[i] = (int16_t)(synth::osc(g_wave, g_phase) * amp * AMP * g_ampScale);
-    g_phase += g_phaseInc;
+    g_phase += g_phaseInc * g_bendRatio;   // gz pitch bend
     if (g_phase >= TWO_PI) g_phase -= TWO_PI;
   }
   M5.Speaker.playRaw(g_buf, CHUNK, SR, false, 1, 0);   // channel 0, no repeat
@@ -192,7 +196,7 @@ void loop() {
     g_gateKey = 0;
   }
 
-  // --- IMU: sample gyro → amp scale, vol, release time ---
+  // --- IMU: sample gyro → amp scale, vol, pitch bend ---
   {
     cardputer::Imu raw;
     if (cardputer::imuRead(raw)) {
@@ -200,25 +204,27 @@ void loop() {
       float cgy = raw.gy - g_calib.gy0;
       float cgz = raw.gz - g_calib.gz0;
       auto r = synth::mapImu(cgx, cgy, cgz);  // dead-zone applied inside mapImu
-      g_ampScale = r.ampScale;
+      g_ampScale  = r.ampScale;
+      g_bendRatio = std::pow(2.0, r.pitchBend / 12.0);  // semitones → freq ratio
       if (r.vol != g_vol) { g_vol = r.vol; cardputer::volume(g_vol); }
-      g_env.configMs(SR, 8.0, 40.0, 0.7, r.releaseMs);
 #if defined(SYNTH_USB_MIDI) || defined(SYNTH_BLE_MIDI)
-      // CC flood guard: only transmit when value changes.
-      uint8_t cc1  = (uint8_t)((r.ampScale - 0.2f) / 0.8f * 127.0f);
-      uint8_t cc7  = (uint8_t)(r.vol / 2);
-      uint8_t cc11 = (uint8_t)((r.releaseMs - 50.0f) / 450.0f * 127.0f);
-      if (cc1 != g_cc1_last || cc7 != g_cc7_last || cc11 != g_cc11_last) {
-        g_cc1_last = cc1; g_cc7_last = cc7; g_cc11_last = cc11;
+      // Controller flood guard: only transmit when a value changes.
+      uint8_t cc1 = (uint8_t)((r.ampScale - 0.2f) / 0.8f * 127.0f);
+      uint8_t cc7 = (uint8_t)(r.vol / 2);
+      // 14-bit pitch bend centered at 0: full gz → ±8191.
+      int bend = (int)(r.pitchBend / synth::IMU_BEND_SEMITONES * 8191.0f);
+      if (bend < -8192) bend = -8192; else if (bend > 8191) bend = 8191;
+      if (cc1 != g_cc1_last || cc7 != g_cc7_last || bend != g_pb_last) {
+        g_cc1_last = cc1; g_cc7_last = cc7; g_pb_last = bend;
 #ifdef SYNTH_USB_MIDI
-        usbMidi.sendControlChange(1,  cc1,  1);
-        usbMidi.sendControlChange(7,  cc7,  1);
-        usbMidi.sendControlChange(11, cc11, 1);
+        usbMidi.sendControlChange(1, cc1, 1);
+        usbMidi.sendControlChange(7, cc7, 1);
+        usbMidi.sendPitchBend(bend, 1);
 #endif
 #ifdef SYNTH_BLE_MIDI
-        MIDI.sendControlChange(1,  cc1,  1);
-        MIDI.sendControlChange(7,  cc7,  1);
-        MIDI.sendControlChange(11, cc11, 1);
+        MIDI.sendControlChange(1, cc1, 1);
+        MIDI.sendControlChange(7, cc7, 1);
+        MIDI.sendPitchBend(bend, 1);
 #endif
       }
 #endif
