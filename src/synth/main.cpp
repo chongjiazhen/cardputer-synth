@@ -24,11 +24,12 @@
 #include "imu_map.h"
 #include <cmath>
 
-// --- USB MIDI ---
+// --- USB MIDI (TinyUSB device + FortySevenEffects MIDI over it) ---
 #ifdef SYNTH_USB_MIDI
-#include "USB.h"
-#include "USBMIDI.h"
-static USBMIDI_Device usbMidi;
+#include <Adafruit_TinyUSB.h>
+#include <MIDI.h>
+static Adafruit_USBD_MIDI usbMidiTransport;
+MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usbMidiTransport, usbMidi);
 #endif
 
 // --- BLE MIDI ---
@@ -113,8 +114,8 @@ static bool heldContains(const std::vector<char>& held, char c) {
 void setup() {
   cardputer::begin();
 #ifdef SYNTH_USB_MIDI
-  USB.begin();
-  usbMidi.begin();
+  usbMidiTransport.setStringDescriptor("Cardputer Synth");
+  usbMidi.begin(MIDI_CHANNEL_OMNI);
 #endif
   M5.Speaker.begin();
   cardputer::volume(g_vol);
