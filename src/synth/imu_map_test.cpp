@@ -29,15 +29,15 @@ int main() {
   check(tiltVelocity(-IMU_TILT_RANGE) == VEL_MIN, "velocity -full = VEL_MIN");
   check(tiltVelocity(-2 * IMU_TILT_RANGE) == VEL_MIN, "velocity clamps low");
 
-  // --- vibrato: resting / opposite tilt → 0 ---
+  // --- vibrato: bidirectional (magnitude), resting → 0 ---
   check(tiltVibrato(0.0f)  == 0.0f, "vibrato flat = 0");
-  check(tiltVibrato(-0.3f) == 0.0f, "vibrato opposite = 0");
   check(tiltVibrato(0.01f) == 0.0f, "vibrato below deadzone = 0");
-  // --- vibrato: full side tilt → 1.0 ---
-  check(near(tiltVibrato(IMU_TILT_RANGE), 1.0f, 0.001f), "vibrato +full = 1");
+  // --- both directions deepen vibrato symmetrically ---
+  check(near(tiltVibrato(IMU_TILT_RANGE),  1.0f, 0.001f), "vibrato +full = 1");
+  check(near(tiltVibrato(-IMU_TILT_RANGE), 1.0f, 0.001f), "vibrato -full = 1");
   check(near(tiltVibrato(2 * IMU_TILT_RANGE), 1.0f, 0.001f), "vibrato clamps");
-  // --- vibrato: half tilt → ~0.5 ---
-  check(near(tiltVibrato(IMU_TILT_RANGE * 0.5f), 0.5f, 0.001f), "vibrato half");
+  check(near(tiltVibrato(IMU_TILT_RANGE * 0.5f),  0.5f, 0.001f), "vibrato +half");
+  check(near(tiltVibrato(-IMU_TILT_RANGE * 0.5f), 0.5f, 0.001f), "vibrato -half");
 
   // --- pitch bend: center, ±full (self-centering via deadzone) ---
   check(near(gyroBend(0.0f), 0.0f, 0.001f), "bend center = 0");

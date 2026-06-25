@@ -21,17 +21,18 @@ inline const char* shapeName(WaveShape s) {
   }
 }
 
-// Per-waveform gain so the four shapes sound about equally loud. At equal peak
-// amplitude, perceived loudness tracks RMS: square 1.0, sine 1/√2≈0.707,
-// saw/tri 1/√3≈0.577. We normalize to the quietest (saw/tri) so no shape needs
-// boosting past ±1 (which would clip): gain = 0.5774 / shapeRMS. Net effect —
-// square and sine come down to match saw/tri; saw/tri stay at full headroom.
+// Per-waveform gain so the four shapes sound about equally loud. Pure RMS
+// matching isn't enough: the ear weights the mid/high harmonics that saw and
+// square are full of, so bright shapes read louder even at matched RMS. These
+// are perceptual estimates — trim by ear on real output. Triangle is the
+// softest pure shape and is peak-limited at 1.0, so it anchors the top; the
+// brighter shapes come down to match it. All gains ≤ 1.0 → no clipping.
 inline double shapeGain(WaveShape shape) {
   switch (shape) {
-    case WaveShape::Sine:   return 0.8165;  // 0.5774 / 0.7071
-    case WaveShape::Square: return 0.5774;  // 0.5774 / 1.0
-    case WaveShape::Saw:    return 1.0;
-    case WaveShape::Tri:    return 1.0;
+    case WaveShape::Tri:    return 1.00;  // softest pure shape, peak-limited — anchor
+    case WaveShape::Sine:   return 0.94;  // pure
+    case WaveShape::Saw:    return 0.38;  // bright — trim hard
+    case WaveShape::Square: return 0.24;  // brightest — trim hardest
     default:                return 1.0;
   }
 }

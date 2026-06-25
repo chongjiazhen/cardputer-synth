@@ -47,10 +47,10 @@ inline uint8_t tiltVelocity(float tiltFwd) {
   return (uint8_t)clampf((float)vel, 1.0f, 127.0f);
 }
 
-// Left/right tilt (calibrated accel) → vibrato depth 0..1, one direction (like
-// pushing a mod wheel up). Resting board / opposite tilt = 0.
+// Left/right tilt (calibrated accel) → vibrato depth 0..1. Bidirectional: tilt
+// either side deepens vibrato (magnitude), resting board = 0.
 inline float tiltVibrato(float tiltSide) {
-  float d = clampf(tiltSide / IMU_TILT_RANGE, 0.0f, 1.0f);
+  float d = clampf(std::fabs(tiltSide) / IMU_TILT_RANGE, 0.0f, 1.0f);
   return (d < VIB_DEADZONE) ? 0.0f : d;
 }
 

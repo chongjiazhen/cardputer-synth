@@ -41,22 +41,15 @@ int main() {
   check(near(osc(WaveShape::Tri, M_PI / 2),  0.0), "tri(pi/2) == 0");
   check(near(osc(WaveShape::Tri, M_PI),       1.0), "tri(pi) == 1");
 
-  // --- shapeGain equalizes RMS across shapes (within ~2%) ---
+  // --- shapeGain: perceptual loudness table sanity ---
   {
-    auto rms = [](WaveShape s) {
-      double sum = 0; const int N = 4096;
-      for (int i = 0; i < N; i++) {
-        double v = osc(s, 2.0 * M_PI * i / N) * shapeGain(s);
-        sum += v * v;
-      }
-      return std::sqrt(sum / N);
-    };
-    double base = rms(WaveShape::Saw);
-    check(near(rms(WaveShape::Sine),   base, 0.02 * base), "gain: sine RMS ~= saw");
-    check(near(rms(WaveShape::Square), base, 0.02 * base), "gain: square RMS ~= saw");
-    check(near(rms(WaveShape::Tri),    base, 0.02 * base), "gain: tri RMS ~= saw");
-    check(shapeGain(WaveShape::Saw) == 1.0 && shapeGain(WaveShape::Tri) == 1.0,
-          "gain: saw/tri unboosted");
+    // All in (0,1] → no clipping; bright shapes trimmed below the pure shapes.
+    for (auto s : {WaveShape::Sine, WaveShape::Saw, WaveShape::Square, WaveShape::Tri})
+      check(shapeGain(s) > 0.0 && shapeGain(s) <= 1.0, "gain: in (0,1]");
+    check(shapeGain(WaveShape::Saw)    < shapeGain(WaveShape::Sine), "gain: saw < sine");
+    check(shapeGain(WaveShape::Square) < shapeGain(WaveShape::Sine), "gain: square < sine");
+    check(shapeGain(WaveShape::Square) < shapeGain(WaveShape::Saw),  "gain: square < saw");
+    check(shapeGain(WaveShape::Tri) == 1.0, "gain: tri anchors top");
   }
 
   // --- shapeName ---
