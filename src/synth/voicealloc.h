@@ -5,15 +5,16 @@
 namespace synth {
 
 // Pick a voice for a new note: prefer an inactive voice; if none, steal the
-// oldest active one (lowest age). Caller passes a monotonically increasing
-// nowAge and stores it on the chosen voice. Returns the voice index.
+// oldest active one (lowest age). Stamps the chosen voice's age with nowAge
+// (a monotonically increasing counter) so later steals pick the true oldest.
+// Returns the voice index.
 inline int allocVoice(Voice* v, int n, int nowAge) {
-  (void)nowAge;
   int oldest = 0;
   for (int i = 0; i < n; i++) {
-    if (!v[i].active) return i;
+    if (!v[i].active) { v[i].age = nowAge; return i; }
     if (v[i].age < v[oldest].age) oldest = i;
   }
+  v[oldest].age = nowAge;
   return oldest;
 }
 

@@ -23,6 +23,13 @@ int main() {
   v[0].age = 9;  // 0 now newest
   check(allocVoice(v, 3, 5) == 1, "steal new oldest = 1");
 
+  // allocVoice stamps the chosen voice's age with nowAge
+  {
+    Voice w[2];
+    int idx = allocVoice(w, 2, 42);
+    check(w[idx].age == 42, "alloc stamps age");
+  }
+
   // findVoiceByKey
   v[1].key = 'a';
   check(findVoiceByKey(v, 3, 'a') == 1, "find key a");
