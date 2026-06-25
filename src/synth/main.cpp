@@ -10,6 +10,9 @@
 //   [  / ]          - octave down / up (clamp 1..7); also ; / ' as fallback
 //   -  / =          - volume down / up (step 16, 0..255)
 //   1 2 3 4         - waveform: Sine / Saw / Square / Tri
+//   5               - sampler: play the recorded mic sample
+//   r               - record ~1s from the mic into the sampler
+//   ` (esc key)     - panic: kill all voices
 //   ,  / .          - low-pass cutoff down / up (toward open)
 //   IMU accel tilt  - fwd/back → note velocity (latched at press); left/right
 //                     → vibrato depth (LFO on pitch, → CC1)
@@ -86,6 +89,13 @@ static int     g_pb_last  = 0x7FFFFFFF;     // sentinel: force first send
 static constexpr int N_VOICES = 6;
 static synth::Voice  g_voices[N_VOICES];
 static int           g_noteAge = 0;       // monotonic allocation counter
+static std::vector<char> g_prevPressed;   // keys held last loop (edge detection)
+
+// Sampler: a mono RAM buffer captured from the mic, played as a voice source.
+static constexpr int SAMPLE_LEN = SR;     // ~1 second at SR
+static int16_t       g_sampleBuf[SAMPLE_LEN];
+static int           g_sampleLen   = 0;   // valid samples (0 = none recorded)
+static bool          g_samplerMode = false;  // true = voices play the sample
 
 // TWO_PI comes from Arduino.h (6.283185...).
 
@@ -97,9 +107,10 @@ static void redraw(const char* lastNote) {
   char cut[12];
   if (g_cutoff >= FC_MAX) snprintf(cut, sizeof(cut), "open");
   else                    snprintf(cut, sizeof(cut), "%dHz", (int)g_cutoff);
+  const char* src = g_samplerMode ? "SMPL" : synth::shapeName(g_wave);
   M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel: %.2f\nvib: %.2f\ncut: %s",
                     g_octave, g_vol, lastNote,
-                    synth::shapeName(g_wave), g_lastVel, g_vibratoDepth, cut);
+                    src, g_lastVel, g_vibratoDepth, cut);
 #ifdef SYNTH_USB_MIDI
   M5.Display.printf("\nUSB MIDI");
 #endif
@@ -117,8 +128,10 @@ static void noteOn(char key, int semitone, uint8_t velocity) {
   v.key      = key;
   v.midi     = midi;
   v.phase    = 0.0f;
-  v.phaseInc = synth::TWO_PI_F * (float)synth::midiToHz(midi) / SR;
-  v.vel      = (float)velocity / 127.0f;
+  v.phaseInc   = synth::TWO_PI_F * (float)synth::midiToHz(midi) / SR;
+  v.vel        = (float)velocity / 127.0f;
+  v.samplePos  = 0.0f;                              // sampler: restart from head
+  v.sampleStep = (float)synth::sampleStep(midi);    // sampler: pitch = playback rate
   v.env.configMs(SR, 8.0, 40.0, 0.7, 120.0);
   v.env.gateOn();
   g_lastVel  = v.vel;
@@ -131,8 +144,12 @@ static void renderChunk() {
     float vibSemi  = g_vibratoDepth * synth::VIB_MAX_SEMITONES * sinf((float)g_lfoPhase);
     float vibRatio = 1.0f + vibSemi * 0.0577623f;
     float bus = 0.0f;
+    bool  smpl = g_samplerMode && g_sampleLen > 0;
     for (int vch = 0; vch < N_VOICES; vch++)
-      bus += synth::voiceSample(g_voices[vch], g_wave, (float)g_bendRatio, vibRatio);
+      bus += smpl
+        ? synth::voiceSampleBuf(g_voices[vch], g_sampleBuf, g_sampleLen,
+                                (float)g_bendRatio, vibRatio)
+        : synth::voiceSample(g_voices[vch], g_wave, (float)g_bendRatio, vibRatio);
     bus = (float)g_filter.process(bus);        // master low-pass (open = passthrough)
     g_buf[i] = synth::mixToInt16(bus, 1.0f, AMP);
     g_lfoPhase += g_lfoInc;
@@ -150,6 +167,26 @@ static bool anyVoiceActive() {
 static bool heldContains(const std::vector<char>& held, char c) {
   for (char h : held) if (h == c) return true;
   return false;
+}
+
+// Capture ~1s from the mic into g_sampleBuf, then play it as the voice source.
+// The ES8311 codec is shared, so stop the speaker before recording and restart
+// it after (proven pattern from the monorepo recorder app). Blocks ~1s.
+static void recordSample() {
+  M5.Display.fillScreen(TFT_RED);
+  M5.Display.setCursor(0, 0);
+  M5.Display.print("REC...");
+  M5.Speaker.end();                    // free the codec for input
+  M5.Mic.begin();
+  if (M5.Mic.record(g_sampleBuf, SAMPLE_LEN, SR)) {
+    while (M5.Mic.isRecording()) delay(1);
+    g_sampleLen = SAMPLE_LEN;
+  }
+  M5.Mic.end();
+  M5.Speaker.begin();                  // restore output
+  cardputer::volume(g_vol);
+  g_samplerMode = (g_sampleLen > 0);   // auto-switch to the new sample
+  redraw("rec");
 }
 
 void setup() {
@@ -183,8 +220,16 @@ void loop() {
 #endif
   cardputer::update();
 
-  // --- note edges: a fresh press (re)triggers the voice (last-note priority) ---
-  for (char c : cardputer::keysJustPressed()) {
+  // --- key edges: process each key once, on its rising edge. keysJustPressed()
+  // re-reports ALL held keys on any matrix change, so we diff against last loop
+  // to get true newly-pressed keys (prevents held notes re-triggering / panic
+  // resuming when an unrelated key is pressed or released). ---
+  std::vector<char> nowPressed = cardputer::keysHeld();
+  std::vector<char> justPressed;
+  for (char c : nowPressed)
+    if (!heldContains(g_prevPressed, c)) justPressed.push_back(c);
+  g_prevPressed = nowPressed;
+  for (char c : justPressed) {
     int s = synth::keyToSemitone(c);
     if (s >= 0) {
       // Latch velocity from the current fwd/back tilt (last IMU sample).
@@ -220,11 +265,12 @@ void loop() {
       cardputer::volume(g_vol);
       redraw("-");
     }
-    // waveform select
-    else if (c == '1') { g_wave = synth::WaveShape::Sine;   redraw("-"); }
-    else if (c == '2') { g_wave = synth::WaveShape::Saw;    redraw("-"); }
-    else if (c == '3') { g_wave = synth::WaveShape::Square; redraw("-"); }
-    else if (c == '4') { g_wave = synth::WaveShape::Tri;    redraw("-"); }
+    // waveform select (also leaves sampler mode)
+    else if (c == '1') { g_wave = synth::WaveShape::Sine;   g_samplerMode = false; redraw("-"); }
+    else if (c == '2') { g_wave = synth::WaveShape::Saw;    g_samplerMode = false; redraw("-"); }
+    else if (c == '3') { g_wave = synth::WaveShape::Square; g_samplerMode = false; redraw("-"); }
+    else if (c == '4') { g_wave = synth::WaveShape::Tri;    g_samplerMode = false; redraw("-"); }
+    else if (c == '5') { if (g_sampleLen > 0) g_samplerMode = true; redraw("-"); }  // sampler
     // filter cutoff: ',' down (more filtering), '.' up (toward open)
     else if (c == ',') {
       g_cutoff = g_cutoff * 0.7; if (g_cutoff < FC_MIN) g_cutoff = FC_MIN;
@@ -232,6 +278,12 @@ void loop() {
     } else if (c == '.') {
       g_cutoff = g_cutoff / 0.7; if (g_cutoff > FC_MAX) g_cutoff = FC_MAX;
       g_filter.setCutoff(g_cutoff, SR); redraw("-");
+    }
+    // r = record a mic sample; ` (esc key) = panic, kill all voices
+    else if (c == 'r') { recordSample(); }
+    else if (c == '`') {
+      for (int i = 0; i < N_VOICES; i++) { g_voices[i].active = false; g_voices[i].key = 0; }
+      redraw("panic");
     }
   }
 
