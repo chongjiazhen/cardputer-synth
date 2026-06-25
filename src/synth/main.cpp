@@ -25,6 +25,9 @@
 #include "oscillator.h"
 #include "imu_map.h"
 #include "filter.h"
+#include "voice.h"
+#include "voicealloc.h"
+#include "mixer.h"
 #include <cmath>
 
 // --- USB MIDI (TinyUSB device + FortySevenEffects MIDI over it) ---
@@ -65,7 +68,6 @@ static double         g_cutoff = FC_MAX;        // start open
 // IMU state. Sensor split: accel tilt (persists) → velocity + vibrato;
 // gyro rate (self-centers) → pitch bend.
 static synth::ImuCalib g_calib;
-static double g_velScale    = 1.0;   // per-note amplitude, latched at note-on
 static float  g_tiltFwd     = 0.0f;  // last calibrated fwd/back tilt (for latch)
 static float  g_vibratoDepth = 0.0f; // 0..1, accel side-tilt → LFO depth
 static double g_bendRatio    = 1.0;  // gyro gz → pitch-bend freq ratio
@@ -79,14 +81,14 @@ static uint8_t g_cc1_last = 0xFF;
 static int     g_pb_last  = 0x7FFFFFFF;     // sentinel: force first send
 #endif
 
-// Voice state — monophonic. Phase runs continuously across chunks (no per-chunk
-// reset) so sustained tones don't click.
-static synth::Adsr g_env;
-static double      g_phaseInc = 0.0;      // radians per sample for current note
-static double      g_phase    = 0.0;      // running oscillator phase
-static char        g_gateKey  = 0;        // note key currently held, 0 = none
+// Voice state — polyphonic. Fixed pool; note-on allocates, note-off gates.
+static constexpr int N_VOICES = 6;
+static synth::Voice  g_voices[N_VOICES];
+static int           g_noteAge = 0;       // monotonic allocation counter
 
 // TWO_PI comes from Arduino.h (6.283185...).
+
+static float g_lastVel = 1.0f;   // velocity of the most recent note-on (for display)
 
 static void redraw(const char* lastNote) {
   M5.Display.fillScreen(TFT_BLACK);
@@ -96,7 +98,7 @@ static void redraw(const char* lastNote) {
   else                    snprintf(cut, sizeof(cut), "%dHz", (int)g_cutoff);
   M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel: %.2f\nvib: %.2f\ncut: %s",
                     g_octave, g_vol, lastNote,
-                    synth::shapeName(g_wave), g_velScale, g_vibratoDepth, cut);
+                    synth::shapeName(g_wave), g_lastVel, g_vibratoDepth, cut);
 #ifdef SYNTH_USB_MIDI
   M5.Display.printf("\nUSB MIDI");
 #endif
@@ -105,33 +107,43 @@ static void redraw(const char* lastNote) {
 #endif
 }
 
-// Start (or retrigger) the voice on a semitone in the current octave at the
-// given velocity (0..127). Velocity is latched into the per-note amplitude.
-static void noteOn(int semitone, uint8_t velocity) {
-  int midi   = synth::noteToMidi(semitone, g_octave);
-  g_phaseInc = TWO_PI * synth::midiToHz(midi) / SR;
-  g_velScale = (double)velocity / 127.0;
-  g_env.gateOn();
+// Allocate a voice for a key press at a semitone + velocity (0..127).
+static void noteOn(char key, int semitone, uint8_t velocity) {
+  int midi = synth::noteToMidi(semitone, g_octave);
+  int i    = synth::allocVoice(g_voices, N_VOICES, ++g_noteAge);
+  synth::Voice& v = g_voices[i];
+  v.active   = true;
+  v.key      = key;
+  v.midi     = midi;
+  v.phase    = 0.0f;
+  v.phaseInc = synth::TWO_PI_F * (float)synth::midiToHz(midi) / SR;
+  v.vel      = (float)velocity / 127.0f;
+  v.env.configMs(SR, 8.0, 40.0, 0.7, 120.0);
+  v.env.gateOn();
+  g_lastVel  = v.vel;
 }
 
-// Render one CHUNK of the sustained voice into g_buf and queue it. Phase and
-// envelope advance per sample. g_velScale (latched note velocity) sets level;
-// g_bendRatio (gyro) + a vibrato LFO (accel-tilt depth) modulate the frequency.
+// Render one CHUNK: sum all active voices, apply the global vibrato LFO + pitch
+// bend (per voice) and the master low-pass + soft limiter (on the mix).
 static void renderChunk() {
   for (size_t i = 0; i < CHUNK; i++) {
-    double amp = g_env.step();
-    double s = synth::osc(g_wave, g_phase) * synth::shapeGain(g_wave);
-    s = g_filter.process(s);                       // low-pass (open = passthrough)
-    g_buf[i] = (int16_t)(s * amp * AMP * g_velScale);
-    // Vibrato: small-angle approx of 2^(semi/12) ≈ 1 + semi*(ln2/12).
-    double vibSemi  = g_vibratoDepth * synth::VIB_MAX_SEMITONES * std::sin(g_lfoPhase);
-    double vibRatio = 1.0 + vibSemi * 0.0577623;
-    g_phase += g_phaseInc * g_bendRatio * vibRatio;
-    if (g_phase >= TWO_PI) g_phase -= TWO_PI;
+    float vibSemi  = g_vibratoDepth * synth::VIB_MAX_SEMITONES * sinf((float)g_lfoPhase);
+    float vibRatio = 1.0f + vibSemi * 0.0577623f;
+    float bus = 0.0f;
+    for (int vch = 0; vch < N_VOICES; vch++)
+      bus += synth::voiceSample(g_voices[vch], g_wave, (float)g_bendRatio, vibRatio);
+    bus = (float)g_filter.process(bus);        // master low-pass (open = passthrough)
+    g_buf[i] = synth::mixToInt16(bus, 1.0f, AMP);
     g_lfoPhase += g_lfoInc;
     if (g_lfoPhase >= TWO_PI) g_lfoPhase -= TWO_PI;
   }
   M5.Speaker.playRaw(g_buf, CHUNK, SR, false, 1, 0);   // channel 0, no repeat
+}
+
+// True while any voice is still sounding (gate or release tail).
+static bool anyVoiceActive() {
+  for (int i = 0; i < N_VOICES; i++) if (g_voices[i].active) return true;
+  return false;
 }
 
 static bool heldContains(const std::vector<char>& held, char c) {
@@ -158,8 +170,6 @@ void setup() {
   }
   g_lfoInc = TWO_PI * synth::LFO_HZ / SR;   // vibrato LFO step per sample
   g_filter.setCutoff(g_cutoff, SR);         // open by default
-  // Snappy organ-ish default: 8ms attack, 40ms decay, hold at 0.7, 120ms release.
-  g_env.configMs(SR, 8.0, 40.0, 0.7, 120.0);
   redraw("-");
 }
 
@@ -178,8 +188,7 @@ void loop() {
     if (s >= 0) {
       // Latch velocity from the current fwd/back tilt (last IMU sample).
       uint8_t vel = synth::tiltVelocity(g_tiltFwd);
-      noteOn(s, vel);
-      g_gateKey = c;
+      noteOn(c, s, vel);
       int midiNote = synth::noteToMidi(s, g_octave);
 #ifdef SYNTH_USB_MIDI
       usbMidi.sendNoteOn(midiNote, vel, 1);
@@ -225,17 +234,22 @@ void loop() {
     }
   }
 
-  // --- gate release: the held note key let go -> enter release tail ---
-  if (g_gateKey && !heldContains(cardputer::keysHeld(), g_gateKey)) {
-    int midiNote = synth::noteToMidi(synth::keyToSemitone(g_gateKey), g_octave);
-    g_env.gateOff();
+  // --- gate release: any voice whose key is no longer held enters its tail ---
+  {
+    auto held = cardputer::keysHeld();
+    for (int i = 0; i < N_VOICES; i++) {
+      synth::Voice& v = g_voices[i];
+      if (v.active && v.key && !heldContains(held, v.key)) {
+        v.env.gateOff();
 #ifdef SYNTH_USB_MIDI
-    usbMidi.sendNoteOff(midiNote, 0, 1);
+        usbMidi.sendNoteOff(v.midi, 0, 1);
 #endif
 #ifdef SYNTH_BLE_MIDI
-    MIDI.sendNoteOff(midiNote, 0, 1);
+        MIDI.sendNoteOff(v.midi, 0, 1);
 #endif
-    g_gateKey = 0;
+        v.key = 0;   // no longer gated; env releases, then voice frees itself
+      }
+    }
   }
 
   // --- IMU: accel tilt → velocity (latched on next note) + vibrato depth;
@@ -271,7 +285,7 @@ void loop() {
   }
 
   // --- keep the speaker fed while the voice is sounding (incl. release tail) ---
-  while (g_env.active() && M5.Speaker.isPlaying(0) < 2) {
+  while (anyVoiceActive() && M5.Speaker.isPlaying(0) < 2) {
     renderChunk();
   }
 

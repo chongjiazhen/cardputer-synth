@@ -34,7 +34,7 @@ inline float shapeGain(WaveShape shape) {
 
 inline float osc(WaveShape shape, float phase) {
   switch (shape) {
-    case WaveShape::Sine:   return std::sinf(phase);
+    case WaveShape::Sine:   return std::sin(phase);
     case WaveShape::Saw:
       // Rises linearly from -1 at phase=0 to +1 at phase approaching 2π.
       return 2.0f * phase / TWO_PI_F - 1.0f;
