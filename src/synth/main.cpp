@@ -94,7 +94,7 @@ static void redraw(const char* lastNote) {
   char cut[12];
   if (g_cutoff >= FC_MAX) snprintf(cut, sizeof(cut), "open");
   else                    snprintf(cut, sizeof(cut), "%dHz", (int)g_cutoff);
-  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel:  %.2f  vib: %.2f\ncut:  %s",
+  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel: %.2f\nvib: %.2f\ncut: %s",
                     g_octave, g_vol, lastNote,
                     synth::shapeName(g_wave), g_velScale, g_vibratoDepth, cut);
 #ifdef SYNTH_USB_MIDI
