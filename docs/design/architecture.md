@@ -77,6 +77,24 @@ master bus → master FX (delay / chorus / drive / bitcrush)
 This *replaces* today's hardwired IMU→param mappings with routable ones (the
 current velocity/vibrato/bend become default matrix entries).
 
+### Output level & headroom (v0.1.0 tunings are preserved invariants)
+
+The hard-won on-device tunings carry forward — they are not re-litigated:
+- **Per-waveform loudness table** (`shapeGain`: tri 1.0 / sine 0.94 / saw 0.38 /
+  square 0.24) — stays, applied per voice.
+- **Safe analog ceiling** found on device (single-voice `AMP = 14000`, ≈ −6 dB)
+  keeps the ES8311 + NS4150B + 1 W speaker out of clipping.
+
+But `AMP = 14000` was a **single-voice** value. With up to 6 summed voices the
+bus can reach ~6× and clip. So in the poly engine the level structure changes:
+each voice outputs at its loudness-matched level, then the **master applies a
+headroom gain + soft limiter** so the *bus peak* lands at the same safe analog
+ceiling we found at v0.1.0. Net target: one voice ≈ as loud as v0.1.0; six
+voices don't clip. Re-measure on device in phase 1.
+
+Residual pure-tone (sine/tri) distortion is the 1 W speaker's THD — a hardware
+limit, accepted.
+
 ## Timbre toolbox (how we get range from cheap tricks)
 
 - **Subtractive** (phase 2) — rich wave (saw/pulse) carved by the resonant SVF +
