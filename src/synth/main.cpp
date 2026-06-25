@@ -45,8 +45,9 @@ MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usbMidiTransport, usbMidi);
 BLEMIDI_CREATE_INSTANCE("Cardputer Synth", MIDI)
 #endif
 
-static constexpr uint32_t SR    = 16000;  // sample rate (matches recorder)
-static constexpr size_t   CHUNK = 256;    // samples per streamed block (~16ms)
+static constexpr uint32_t SR    = 32000;  // sample rate (16k→32k: Nyquist 16kHz,
+                                          // brighter, less aliasing)
+static constexpr size_t   CHUNK = 256;    // samples per streamed block (~8ms @32k)
 static constexpr int      AMP   = 14000;  // amplitude headroom — keep analog stage
                                           // (ES8311 + NS4150B + 1W spkr) out of
                                           // clipping; pure sine/tri reveal overdrive
