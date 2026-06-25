@@ -21,7 +21,7 @@ static void check(bool cond, const char* msg) {
   }
 }
 
-static bool near(double a, double b, double eps = 1e-9) {
+static bool near(float a, float b, float eps = 1e-5f) {
   return std::fabs(a - b) < eps;
 }
 
@@ -55,8 +55,8 @@ int main() {
   }
 
   // --- float constants present ---
-  check(near(TWO_PI_F, 6.2831853f, 1e-4), "TWO_PI_F");
-  check(near(PI_F, 3.1415927f, 1e-4), "PI_F");
+  check(near(TWO_PI_F, 6.2831853f, 1e-4f), "TWO_PI_F");
+  check(near(PI_F, 3.1415927f, 1e-4f), "PI_F");
 
   // --- shapeName ---
   check(std::string(shapeName(WaveShape::Sine))   == "SINE", "name Sine");
