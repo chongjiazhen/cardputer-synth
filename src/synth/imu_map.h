@@ -27,7 +27,7 @@ constexpr uint8_t VEL_MIN           = 30;   // floor so soft notes stay audible
 constexpr float   VIB_DEADZONE      = 0.05f;
 
 // --- Vibrato LFO ---
-constexpr float VIB_MAX_SEMITONES = 0.5f;   // depth 1.0 → ±0.5 semitone
+constexpr float VIB_MAX_SEMITONES = 1.0f;   // depth 1.0 → ±1 semitone
 constexpr float LFO_HZ            = 5.5f;
 
 inline float clampf(float v, float lo, float hi) {
