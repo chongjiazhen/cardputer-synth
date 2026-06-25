@@ -23,6 +23,11 @@ put things permanently out of scope are at the bottom.
   bell timbres beyond the four basic waveforms.
 - **User-remappable MIDI CC** — let the player assign which gyro/accel axis
   drives which CC, instead of the fixed mapping.
+- **On-device parameter editing** — a settings/edit mode on the Cardputer to
+  tune the values that are compile-time constants today (vibrato depth + LFO
+  rate, per-waveform loudness gains, ADSR, filter range, IMU tilt sensitivity,
+  pitch-bend range) and **persist** them across reboots via ESP32 NVS /
+  `Preferences`. The natural home for everything currently dialed in by reflash.
 
 ## Permanently out of scope
 
