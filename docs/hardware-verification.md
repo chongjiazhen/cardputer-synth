@@ -44,17 +44,24 @@ separate from the app USB stack).
 
 ## 2. IMU expression (env: `synth`)
 
-IMU is sampled as **angular velocity** (deg/s) with a ±3 deg/s dead-zone and
-zero-offset captured at boot — hold the board **still during power-on** for a
-clean center.
+Two sensors: **accel** (absolute tilt, persists when held) drives velocity +
+vibrato; **gyro** (angular rate, self-centers) drives pitch bend. Both zero to
+the boot pose — hold the board **still and flat at power-on** for a clean center.
 
-- [ ] **gx** rotate → amplitude scales (0.2..1.0); `amp:` on screen tracks it.
-- [ ] **gy** rotate → speaker volume changes.
-- [ ] **gz** rotate → **pitch bends ±2 semitones**, and **springs back to
-      pitch when you stop rotating** (self-centering — it's a rate axis, not
-      absolute tilt). This is the finalized 3rd-axis mapping.
-- [ ] Board held still → all three return to neutral (no drift = calibration
-      good).
+- [ ] **Velocity** — tilt board **fwd/back**, then press a key: tilt one way →
+      note hits hard, the other way → soft, flat → medium. `vel:` on screen
+      shows the latched value. (The keyboard has no velocity sensing; tilt is
+      the dynamics source.)
+- [ ] **Vibrato** — tilt board **left/right** while holding a note → pitch
+      wobble (~5.5 Hz) deepens; `vib:` tracks 0..1. Resting/flat → no vibrato.
+- [ ] **Pitch bend** — **twist** (gz) → pitch bends ±2 semitones and **springs
+      back** when you stop twisting (self-centering wheel).
+- [ ] Board still + flat → vel mid, vib 0, no bend drift (calibration good).
+
+> **Axis check:** if fwd/back and left/right feel swapped (velocity reacts to
+> side tilt, vibrato to fwd tilt), the accel axes are mapped the other way for
+> this board — swap `raw.ay`/`raw.ax` in the IMU block of `main.cpp`. If a
+> direction is inverted, negate that axis.
 
 ## 3. USB MIDI → REAPER (env: `synth-usb-midi`)
 
@@ -64,10 +71,11 @@ clean center.
 - [ ] REAPER → *Preferences → MIDI Devices* → "Cardputer Synth" input shows up;
       **enable** it.
 - [ ] Arm a track with a virtual instrument, input = the device. Pressing synth
-      keys triggers **note on/off** (velocity 100).
-- [ ] Rotate the board: **CC 1** (mod, from gx), **CC 7** (volume, from gy), and
-      **pitch-bend** (from gz) arrive — watch REAPER's MIDI monitor / the
-      instrument's bend + mod response. (CC 11 is gone; gz is pitch bend now.)
+      keys triggers **note on/off**, with **velocity** that tracks your fwd/back
+      tilt at the moment of each press (not a fixed value).
+- [ ] Tilt left/right → **CC 1** (mod = vibrato depth); twist → **pitch-bend**
+      arrive — watch REAPER's MIDI monitor / the instrument's mod + bend
+      response. (Only CC1 + pitch-bend now; CC7/CC11 are gone.)
 - [ ] Hold the board still → no CC/bend flood (the change-only guard works).
 
 ## 4. BLE MIDI → REAPER (env: `synth-ble-midi`)
@@ -76,7 +84,7 @@ clean center.
       not see BLE-MIDI natively — bridge it (e.g. **loopMIDI + a BLE-MIDI
       connector**, or use **macOS** *Audio MIDI Setup → Bluetooth* which is
       first-class).
-- [ ] Same note + CC1/CC7 + pitch-bend checks as §3, over BLE.
+- [ ] Same velocity + CC1 (vibrato) + pitch-bend checks as §3, over BLE.
 - [ ] Latency is usable for playing (BLE adds a few ms over USB).
 
 ## Controls reference
@@ -88,7 +96,9 @@ clean center.
 | `[` `]` (or `;` `'`) | octave down / up (1..7) |
 | `-` `=` | volume down / up |
 | `1 2 3 4` | waveform: sine / saw / square / tri |
-| rotate gx / gy / gz | amp / volume / pitch-bend ±2 semitones |
+| tilt fwd/back | note velocity (latched at press) |
+| tilt left/right | vibrato depth (→ CC1) |
+| twist (gz) | pitch bend ±2 semitones |
 
 > Wake the keyboard with **Fn + key** first if it isn't responding.
 

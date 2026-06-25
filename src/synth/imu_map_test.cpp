@@ -16,64 +16,40 @@ static bool near(float a, float b, float tol = 1.0f) {
 int main() {
   using namespace synth;
 
-  // --- center (0,0,0): ampScale≈0.6, vol≈128, pitchBend≈0 ---
+  // --- velocity: flat (0) → midpoint ---
   {
-    auto r = mapImu(0, 0, 0);
-    check(near(r.ampScale, 0.6f, 0.01f),     "center ampScale");
-    check(r.vol == 128,                      "center vol");
-    check(near(r.pitchBend, 0.0f, 0.001f),   "center pitchBend");
+    uint8_t v = tiltVelocity(0.0f);
+    int mid = VEL_MIN + (int)((127 - VEL_MIN) * 0.5f + 0.5f);
+    check(v == (uint8_t)mid, "velocity flat = midpoint");
   }
+  // --- velocity: full forward tilt → 127 ---
+  check(tiltVelocity(IMU_TILT_RANGE)  == 127, "velocity +full = 127");
+  check(tiltVelocity(2 * IMU_TILT_RANGE) == 127, "velocity clamps high");
+  // --- velocity: full back tilt → VEL_MIN ---
+  check(tiltVelocity(-IMU_TILT_RANGE) == VEL_MIN, "velocity -full = VEL_MIN");
+  check(tiltVelocity(-2 * IMU_TILT_RANGE) == VEL_MIN, "velocity clamps low");
 
-  // --- gx = +IMU_RANGE → ampScale≈1.0 ---
-  {
-    auto r = mapImu(IMU_RANGE, 0, 0);
-    check(near(r.ampScale, 1.0f, 0.01f), "gx+ ampScale");
-  }
+  // --- vibrato: resting / opposite tilt → 0 ---
+  check(tiltVibrato(0.0f)  == 0.0f, "vibrato flat = 0");
+  check(tiltVibrato(-0.3f) == 0.0f, "vibrato opposite = 0");
+  check(tiltVibrato(0.01f) == 0.0f, "vibrato below deadzone = 0");
+  // --- vibrato: full side tilt → 1.0 ---
+  check(near(tiltVibrato(IMU_TILT_RANGE), 1.0f, 0.001f), "vibrato +full = 1");
+  check(near(tiltVibrato(2 * IMU_TILT_RANGE), 1.0f, 0.001f), "vibrato clamps");
+  // --- vibrato: half tilt → ~0.5 ---
+  check(near(tiltVibrato(IMU_TILT_RANGE * 0.5f), 0.5f, 0.001f), "vibrato half");
 
-  // --- gx = -IMU_RANGE → ampScale≈0.2 ---
-  {
-    auto r = mapImu(-IMU_RANGE, 0, 0);
-    check(near(r.ampScale, 0.2f, 0.01f), "gx- ampScale");
-  }
-
-  // --- gy = +IMU_RANGE → vol==255 ---
-  {
-    auto r = mapImu(0, IMU_RANGE, 0);
-    check(r.vol == 255, "gy+ vol");
-  }
-
-  // --- gy = -IMU_RANGE → vol==0 ---
-  {
-    auto r = mapImu(0, -IMU_RANGE, 0);
-    check(r.vol == 0, "gy- vol");
-  }
-
-  // --- gz = +IMU_RANGE → pitchBend≈+IMU_BEND_SEMITONES ---
-  {
-    auto r = mapImu(0, 0, IMU_RANGE);
-    check(near(r.pitchBend, IMU_BEND_SEMITONES, 0.001f), "gz+ pitchBend");
-  }
-
-  // --- gz = -IMU_RANGE → pitchBend≈-IMU_BEND_SEMITONES ---
-  {
-    auto r = mapImu(0, 0, -IMU_RANGE);
-    check(near(r.pitchBend, -IMU_BEND_SEMITONES, 0.001f), "gz- pitchBend");
-  }
-
-  // --- dead zone: (1,1,1) all within ±IMU_DEAD → same as (0,0,0) ---
-  {
-    auto r0 = mapImu(0, 0, 0);
-    auto rd = mapImu(1.0f, 1.0f, 1.0f);
-    check(near(rd.ampScale,  r0.ampScale,  0.01f),  "deadzone ampScale");
-    check(rd.vol       == r0.vol,                   "deadzone vol");
-    check(near(rd.pitchBend, r0.pitchBend, 0.001f), "deadzone pitchBend");
-  }
+  // --- pitch bend: center, ±full (self-centering via deadzone) ---
+  check(near(gyroBend(0.0f), 0.0f, 0.001f), "bend center = 0");
+  check(near(gyroBend(1.0f), 0.0f, 0.001f), "bend within deadzone = 0");
+  check(near(gyroBend(IMU_RANGE),  IMU_BEND_SEMITONES, 0.001f), "bend +full");
+  check(near(gyroBend(-IMU_RANGE), -IMU_BEND_SEMITONES, 0.001f), "bend -full");
 
   // --- calibrate: offsets stored ---
   {
-    auto c = calibrate(5.0f, -2.0f, 3.0f);
-    check(near(c.gx0,  5.0f, 0.001f), "calib gx0");
-    check(near(c.gy0, -2.0f, 0.001f), "calib gy0");
+    auto c = calibrate(0.1f, -0.2f, 3.0f);
+    check(near(c.ax0,  0.1f, 0.001f), "calib ax0");
+    check(near(c.ay0, -0.2f, 0.001f), "calib ay0");
     check(near(c.gz0,  3.0f, 0.001f), "calib gz0");
   }
 

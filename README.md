@@ -8,10 +8,11 @@ output.
 
 - **Waveforms:** sine / saw / square / triangle (keys `1`–`4`)
 - **ADSR envelope** with key-held sustain
-- **IMU expression** — gyro rotation maps to amplitude (gx), volume (gy), and
-  pitch bend ±2 semitones (gz, self-centering); graceful no-op if IMU absent
+- **IMU expression** — accel tilt → note velocity (fwd/back, latched per note)
+  + vibrato depth (left/right); gyro twist → pitch bend ±2 semitones
+  (self-centering); graceful no-op if IMU absent
 - **MIDI out** — USB-MIDI and BLE-MIDI (device name "Cardputer Synth"); sends
-  note on/off + CC 1 (mod) / CC 7 (volume) / pitch-bend from gyro expression
+  note on/off with tilt velocity + CC 1 (vibrato) + pitch-bend
 
 ## Build
 

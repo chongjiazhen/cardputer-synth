@@ -10,8 +10,9 @@
 //   [  / ]          - octave down / up (clamp 1..7); also ; / ' as fallback
 //   -  / =          - volume down / up (step 16, 0..255)
 //   1 2 3 4         - waveform: Sine / Saw / Square / Tri
-//   IMU (gyro)      - rotate gx → amp scale, gy → vol, gz → pitch bend (±2
-//                     semitones, self-centering spring-loaded wheel)
+//   IMU accel tilt  - fwd/back → note velocity (latched at press); left/right
+//                     → vibrato depth (LFO on pitch, → CC1)
+//   IMU gyro twist  - gz → pitch bend (±2 semitones, self-centering wheel)
 //
 // Build envs:
 //   synth             — standalone audio only
@@ -53,15 +54,20 @@ static uint8_t g_vol    = 128;            // 0..255 (speaker output)
 // Waveform state
 static synth::WaveShape g_wave = synth::WaveShape::Sine;
 
-// IMU state
+// IMU state. Sensor split: accel tilt (persists) → velocity + vibrato;
+// gyro rate (self-centers) → pitch bend.
 static synth::ImuCalib g_calib;
-static float           g_ampScale  = 1.0f;  // gyro gx → amplitude multiplier
-static double          g_bendRatio = 1.0;   // gyro gz → pitch-bend freq ratio
+static double g_velScale    = 1.0;   // per-note amplitude, latched at note-on
+static float  g_tiltFwd     = 0.0f;  // last calibrated fwd/back tilt (for latch)
+static float  g_vibratoDepth = 0.0f; // 0..1, accel side-tilt → LFO depth
+static double g_bendRatio    = 1.0;  // gyro gz → pitch-bend freq ratio
+static double g_lfoPhase     = 0.0;  // vibrato LFO phase
+static double g_lfoInc       = 0.0;  // set in setup from LFO_HZ / SR
 
 // MIDI last-sent tracking — only transmit on change (prevents controller floods).
-// gx→CC1 (mod), gy→CC7 (vol), gz→pitch bend (14-bit, center 0).
+// vibrato→CC1 (mod), pitch bend→14-bit (center 0). Velocity rides each note-on.
 #if defined(SYNTH_USB_MIDI) || defined(SYNTH_BLE_MIDI)
-static uint8_t g_cc1_last = 0xFF, g_cc7_last = 0xFF;
+static uint8_t g_cc1_last = 0xFF;
 static int     g_pb_last  = 0x7FFFFFFF;     // sentinel: force first send
 #endif
 
@@ -77,9 +83,9 @@ static char        g_gateKey  = 0;        // note key currently held, 0 = none
 static void redraw(const char* lastNote) {
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setCursor(0, 0);
-  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\namp:  %.2f",
+  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel:  %.2f  vib: %.2f",
                     g_octave, g_vol, lastNote,
-                    synth::shapeName(g_wave), g_ampScale);
+                    synth::shapeName(g_wave), g_velScale, g_vibratoDepth);
 #ifdef SYNTH_USB_MIDI
   M5.Display.printf("\nUSB MIDI");
 #endif
@@ -88,23 +94,30 @@ static void redraw(const char* lastNote) {
 #endif
 }
 
-// Start (or retrigger) the voice on a semitone in the current octave.
-static void noteOn(int semitone) {
+// Start (or retrigger) the voice on a semitone in the current octave at the
+// given velocity (0..127). Velocity is latched into the per-note amplitude.
+static void noteOn(int semitone, uint8_t velocity) {
   int midi   = synth::noteToMidi(semitone, g_octave);
   g_phaseInc = TWO_PI * synth::midiToHz(midi) / SR;
+  g_velScale = (double)velocity / 127.0;
   g_env.gateOn();
 }
 
 // Render one CHUNK of the sustained voice into g_buf and queue it. Phase and
-// envelope advance per sample; envelope shapes amplitude (attack/decay/sustain/
-// release). g_ampScale from IMU modulates overall output level.
+// envelope advance per sample. g_velScale (latched note velocity) sets level;
+// g_bendRatio (gyro) + a vibrato LFO (accel-tilt depth) modulate the frequency.
 static void renderChunk() {
   for (size_t i = 0; i < CHUNK; i++) {
     double amp = g_env.step();
     g_buf[i] = (int16_t)(synth::osc(g_wave, g_phase) * synth::shapeGain(g_wave)
-                         * amp * AMP * g_ampScale);
-    g_phase += g_phaseInc * g_bendRatio;   // gz pitch bend
+                         * amp * AMP * g_velScale);
+    // Vibrato: small-angle approx of 2^(semi/12) ≈ 1 + semi*(ln2/12).
+    double vibSemi  = g_vibratoDepth * synth::VIB_MAX_SEMITONES * std::sin(g_lfoPhase);
+    double vibRatio = 1.0 + vibSemi * 0.0577623;
+    g_phase += g_phaseInc * g_bendRatio * vibRatio;
     if (g_phase >= TWO_PI) g_phase -= TWO_PI;
+    g_lfoPhase += g_lfoInc;
+    if (g_lfoPhase >= TWO_PI) g_lfoPhase -= TWO_PI;
   }
   M5.Speaker.playRaw(g_buf, CHUNK, SR, false, 1, 0);   // channel 0, no repeat
 }
@@ -125,11 +138,13 @@ void setup() {
 #ifdef SYNTH_BLE_MIDI
   MIDI.begin(MIDI_CHANNEL_OMNI);
 #endif
-  // Calibrate IMU: snapshot at startup while device is still.
+  // Calibrate IMU: snapshot at startup while device is still + flat. Captures
+  // the accel tilt zero (ax/ay) and the gyro-z drift offset.
   {
     cardputer::Imu raw;
-    if (cardputer::imuRead(raw)) g_calib = synth::calibrate(raw.gx, raw.gy, raw.gz);
+    if (cardputer::imuRead(raw)) g_calib = synth::calibrate(raw.ax, raw.ay, raw.gz);
   }
+  g_lfoInc = TWO_PI * synth::LFO_HZ / SR;   // vibrato LFO step per sample
   // Snappy organ-ish default: 8ms attack, 40ms decay, hold at 0.7, 120ms release.
   g_env.configMs(SR, 8.0, 40.0, 0.7, 120.0);
   redraw("-");
@@ -148,14 +163,16 @@ void loop() {
   for (char c : cardputer::keysJustPressed()) {
     int s = synth::keyToSemitone(c);
     if (s >= 0) {
-      noteOn(s);
+      // Latch velocity from the current fwd/back tilt (last IMU sample).
+      uint8_t vel = synth::tiltVelocity(g_tiltFwd);
+      noteOn(s, vel);
       g_gateKey = c;
       int midiNote = synth::noteToMidi(s, g_octave);
 #ifdef SYNTH_USB_MIDI
-      usbMidi.sendNoteOn(midiNote, 100, 1);
+      usbMidi.sendNoteOn(midiNote, vel, 1);
 #endif
 #ifdef SYNTH_BLE_MIDI
-      MIDI.sendNoteOn(midiNote, 100, 1);
+      MIDI.sendNoteOn(midiNote, vel, 1);
 #endif
       char label[8];
       snprintf(label, sizeof(label), "%s%d", synth::semitoneName(s), g_octave);
@@ -200,34 +217,31 @@ void loop() {
     g_gateKey = 0;
   }
 
-  // --- IMU: sample gyro → amp scale, vol, pitch bend ---
+  // --- IMU: accel tilt → velocity (latched on next note) + vibrato depth;
+  //         gyro twist → pitch bend ---
   {
     cardputer::Imu raw;
     if (cardputer::imuRead(raw)) {
-      float cgx = raw.gx - g_calib.gx0;
-      float cgy = raw.gy - g_calib.gy0;
-      float cgz = raw.gz - g_calib.gz0;
-      auto r = synth::mapImu(cgx, cgy, cgz);  // dead-zone applied inside mapImu
-      g_ampScale  = r.ampScale;
-      g_bendRatio = std::pow(2.0, r.pitchBend / 12.0);  // semitones → freq ratio
-      if (r.vol != g_vol) { g_vol = r.vol; cardputer::volume(g_vol); }
+      g_tiltFwd  = raw.ay - g_calib.ay0;                 // fwd/back → velocity
+      float side = raw.ax - g_calib.ax0;                 // left/right → vibrato
+      float gz   = raw.gz - g_calib.gz0;                 // twist → pitch bend
+      g_vibratoDepth = synth::tiltVibrato(side);
+      float bendSemi = synth::gyroBend(gz);
+      g_bendRatio    = std::pow(2.0, bendSemi / 12.0);   // semitones → freq ratio
 #if defined(SYNTH_USB_MIDI) || defined(SYNTH_BLE_MIDI)
       // Controller flood guard: only transmit when a value changes.
-      uint8_t cc1 = (uint8_t)((r.ampScale - 0.2f) / 0.8f * 127.0f);
-      uint8_t cc7 = (uint8_t)(r.vol / 2);
+      uint8_t cc1 = (uint8_t)(g_vibratoDepth * 127.0f);  // vibrato depth → mod
       // 14-bit pitch bend centered at 0: full gz → ±8191.
-      int bend = (int)(r.pitchBend / synth::IMU_BEND_SEMITONES * 8191.0f);
+      int bend = (int)(bendSemi / synth::IMU_BEND_SEMITONES * 8191.0f);
       if (bend < -8192) bend = -8192; else if (bend > 8191) bend = 8191;
-      if (cc1 != g_cc1_last || cc7 != g_cc7_last || bend != g_pb_last) {
-        g_cc1_last = cc1; g_cc7_last = cc7; g_pb_last = bend;
+      if (cc1 != g_cc1_last || bend != g_pb_last) {
+        g_cc1_last = cc1; g_pb_last = bend;
 #ifdef SYNTH_USB_MIDI
         usbMidi.sendControlChange(1, cc1, 1);
-        usbMidi.sendControlChange(7, cc7, 1);
         usbMidi.sendPitchBend(bend, 1);
 #endif
 #ifdef SYNTH_BLE_MIDI
         MIDI.sendControlChange(1, cc1, 1);
-        MIDI.sendControlChange(7, cc7, 1);
         MIDI.sendPitchBend(bend, 1);
 #endif
       }
