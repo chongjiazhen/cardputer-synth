@@ -53,6 +53,11 @@ g++ -std=c++17 -I src/synth src/synth/notes_test.cpp      -o /tmp/t && /tmp/t
 g++ -std=c++17 -I src/synth src/synth/imu_map_test.cpp    -o /tmp/t && /tmp/t
 ```
 
+## Roadmap
+
+Planned features (mic sampling, filter, FM, IMU expression redesign) and
+hardware-imposed limits are in [docs/roadmap.md](docs/roadmap.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
