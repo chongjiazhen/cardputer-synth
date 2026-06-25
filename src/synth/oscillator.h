@@ -21,6 +21,21 @@ inline const char* shapeName(WaveShape s) {
   }
 }
 
+// Per-waveform gain so the four shapes sound about equally loud. At equal peak
+// amplitude, perceived loudness tracks RMS: square 1.0, sine 1/√2≈0.707,
+// saw/tri 1/√3≈0.577. We normalize to the quietest (saw/tri) so no shape needs
+// boosting past ±1 (which would clip): gain = 0.5774 / shapeRMS. Net effect —
+// square and sine come down to match saw/tri; saw/tri stay at full headroom.
+inline double shapeGain(WaveShape shape) {
+  switch (shape) {
+    case WaveShape::Sine:   return 0.8165;  // 0.5774 / 0.7071
+    case WaveShape::Square: return 0.5774;  // 0.5774 / 1.0
+    case WaveShape::Saw:    return 1.0;
+    case WaveShape::Tri:    return 1.0;
+    default:                return 1.0;
+  }
+}
+
 inline double osc(WaveShape shape, double phase) {
   switch (shape) {
     case WaveShape::Sine:

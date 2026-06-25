@@ -41,7 +41,9 @@ BLEMIDI_CREATE_INSTANCE("Cardputer Synth", MIDI)
 
 static constexpr uint32_t SR    = 16000;  // sample rate (matches recorder)
 static constexpr size_t   CHUNK = 256;    // samples per streamed block (~16ms)
-static constexpr int      AMP   = 28000;  // full-scale amplitude, headroom < int16 max
+static constexpr int      AMP   = 14000;  // amplitude headroom — keep analog stage
+                                          // (ES8311 + NS4150B + 1W spkr) out of
+                                          // clipping; pure sine/tri reveal overdrive
 
 static int16_t g_buf[CHUNK];
 
@@ -99,7 +101,8 @@ static void noteOn(int semitone) {
 static void renderChunk() {
   for (size_t i = 0; i < CHUNK; i++) {
     double amp = g_env.step();
-    g_buf[i] = (int16_t)(synth::osc(g_wave, g_phase) * amp * AMP * g_ampScale);
+    g_buf[i] = (int16_t)(synth::osc(g_wave, g_phase) * synth::shapeGain(g_wave)
+                         * amp * AMP * g_ampScale);
     g_phase += g_phaseInc * g_bendRatio;   // gz pitch bend
     if (g_phase >= TWO_PI) g_phase -= TWO_PI;
   }
