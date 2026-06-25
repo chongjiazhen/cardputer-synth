@@ -19,6 +19,13 @@ put things permanently out of scope are at the bottom.
   (single-cycle wavetable or one-shot). Turns the synth into a rough sampler.
   Needs: mic capture path, sample storage (RAM/flash/SD), and an oscillator mode
   that reads the captured buffer instead of `osc()`.
+- **Arpeggiator** — hold keys → auto-cycle them (up / down / up-down / random)
+  at a clock rate. Cheap, very playable standalone. Pure event logic, no DSP
+  cost.
+- **Looper / step sequencer** — record note *events* (not audio) to RAM, loop
+  them, play live on top. Cheap (events are tiny). Turns the synth into a
+  self-contained jam box. Arp + looper share one internal clock — build the
+  clock once, both ride it (a metronome falls out of the same clock).
 - **2-op FM** (DX7-style) — feasible within the SR/CPU budget; adds metallic /
   bell timbres beyond the four basic waveforms.
 - **User-remappable MIDI CC** — let the player assign which gyro/accel axis
