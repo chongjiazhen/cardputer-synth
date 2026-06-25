@@ -38,7 +38,10 @@ separate from the app USB stack).
 - [ ] Hold a key → tone **sustains** (does not decay to silence); release →
       short release tail, then silence. (This was the original "120 ms bell, no
       sustain" bug — confirm it's gone.)
-- [ ] `1 2 3 4` switch sine / saw / square / tri — audibly different timbres.
+- [ ] `1 2 3 4` switch sine / saw / square / tri — audibly different timbres,
+      roughly matched in loudness (no shape jumps out far louder).
+- [ ] `,` darkens the tone (low-pass closes), `.` opens it back to bright;
+      `cut:` on screen shows the cutoff Hz / "open". Most obvious on saw/square.
 - [ ] `[` / `]` (or `;` / `'`) octave down / up, clamp 1..7.
 - [ ] `-` / `=` volume down / up.
 
@@ -96,6 +99,7 @@ the boot pose — hold the board **still and flat at power-on** for a clean cent
 | `[` `]` (or `;` `'`) | octave down / up (1..7) |
 | `-` `=` | volume down / up |
 | `1 2 3 4` | waveform: sine / saw / square / tri |
+| `,` `.` | low-pass cutoff down / up (toward open) |
 | tilt fwd/back | note velocity (latched at press) |
 | tilt left/right | vibrato depth (→ CC1) |
 | twist (gz) | pitch bend ±2 semitones |

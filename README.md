@@ -6,7 +6,8 @@ output.
 
 ## Features
 
-- **Waveforms:** sine / saw / square / triangle (keys `1`–`4`)
+- **Waveforms:** sine / saw / square / triangle (keys `1`–`4`), loudness-matched
+- **Low-pass filter** — runtime 1-pole LPF, cutoff on `,` / `.` (open by default)
 - **ADSR envelope** with key-held sustain
 - **IMU expression** — accel tilt → note velocity (fwd/back, latched per note)
   + vibrato depth (left/right); gyro twist → pitch bend ±2 semitones

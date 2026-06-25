@@ -10,6 +10,7 @@
 //   [  / ]          - octave down / up (clamp 1..7); also ; / ' as fallback
 //   -  / =          - volume down / up (step 16, 0..255)
 //   1 2 3 4         - waveform: Sine / Saw / Square / Tri
+//   ,  / .          - low-pass cutoff down / up (toward open)
 //   IMU accel tilt  - fwd/back → note velocity (latched at press); left/right
 //                     → vibrato depth (LFO on pitch, → CC1)
 //   IMU gyro twist  - gz → pitch bend (±2 semitones, self-centering wheel)
@@ -23,6 +24,7 @@
 #include "adsr.h"
 #include "oscillator.h"
 #include "imu_map.h"
+#include "filter.h"
 #include <cmath>
 
 // --- USB MIDI (TinyUSB device + FortySevenEffects MIDI over it) ---
@@ -54,6 +56,12 @@ static uint8_t g_vol    = 128;            // 0..255 (speaker output)
 // Waveform state
 static synth::WaveShape g_wave = synth::WaveShape::Sine;
 
+// Low-pass filter (runtime, ',' / '.' keys). Default open = no tone change.
+static constexpr double FC_MIN = 120.0;        // Hz
+static constexpr double FC_MAX = SR * 0.5;     // Nyquist → "open"/bypass
+static synth::OnePole g_filter;
+static double         g_cutoff = FC_MAX;        // start open
+
 // IMU state. Sensor split: accel tilt (persists) → velocity + vibrato;
 // gyro rate (self-centers) → pitch bend.
 static synth::ImuCalib g_calib;
@@ -83,9 +91,12 @@ static char        g_gateKey  = 0;        // note key currently held, 0 = none
 static void redraw(const char* lastNote) {
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setCursor(0, 0);
-  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel:  %.2f  vib: %.2f",
+  char cut[12];
+  if (g_cutoff >= FC_MAX) snprintf(cut, sizeof(cut), "open");
+  else                    snprintf(cut, sizeof(cut), "%dHz", (int)g_cutoff);
+  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel:  %.2f  vib: %.2f\ncut:  %s",
                     g_octave, g_vol, lastNote,
-                    synth::shapeName(g_wave), g_velScale, g_vibratoDepth);
+                    synth::shapeName(g_wave), g_velScale, g_vibratoDepth, cut);
 #ifdef SYNTH_USB_MIDI
   M5.Display.printf("\nUSB MIDI");
 #endif
@@ -109,8 +120,9 @@ static void noteOn(int semitone, uint8_t velocity) {
 static void renderChunk() {
   for (size_t i = 0; i < CHUNK; i++) {
     double amp = g_env.step();
-    g_buf[i] = (int16_t)(synth::osc(g_wave, g_phase) * synth::shapeGain(g_wave)
-                         * amp * AMP * g_velScale);
+    double s = synth::osc(g_wave, g_phase) * synth::shapeGain(g_wave);
+    s = g_filter.process(s);                       // low-pass (open = passthrough)
+    g_buf[i] = (int16_t)(s * amp * AMP * g_velScale);
     // Vibrato: small-angle approx of 2^(semi/12) ≈ 1 + semi*(ln2/12).
     double vibSemi  = g_vibratoDepth * synth::VIB_MAX_SEMITONES * std::sin(g_lfoPhase);
     double vibRatio = 1.0 + vibSemi * 0.0577623;
@@ -145,6 +157,7 @@ void setup() {
     if (cardputer::imuRead(raw)) g_calib = synth::calibrate(raw.ax, raw.ay, raw.gz);
   }
   g_lfoInc = TWO_PI * synth::LFO_HZ / SR;   // vibrato LFO step per sample
+  g_filter.setCutoff(g_cutoff, SR);         // open by default
   // Snappy organ-ish default: 8ms attack, 40ms decay, hold at 0.7, 120ms release.
   g_env.configMs(SR, 8.0, 40.0, 0.7, 120.0);
   redraw("-");
@@ -202,6 +215,14 @@ void loop() {
     else if (c == '2') { g_wave = synth::WaveShape::Saw;    redraw("-"); }
     else if (c == '3') { g_wave = synth::WaveShape::Square; redraw("-"); }
     else if (c == '4') { g_wave = synth::WaveShape::Tri;    redraw("-"); }
+    // filter cutoff: ',' down (more filtering), '.' up (toward open)
+    else if (c == ',') {
+      g_cutoff = g_cutoff * 0.7; if (g_cutoff < FC_MIN) g_cutoff = FC_MIN;
+      g_filter.setCutoff(g_cutoff, SR); redraw("-");
+    } else if (c == '.') {
+      g_cutoff = g_cutoff / 0.7; if (g_cutoff > FC_MAX) g_cutoff = FC_MAX;
+      g_filter.setCutoff(g_cutoff, SR); redraw("-");
+    }
   }
 
   // --- gate release: the held note key let go -> enter release tail ---

@@ -3,12 +3,14 @@
 Feasible, not-yet-built features, roughly in priority order. Hardware limits that
 put things permanently out of scope are at the bottom.
 
-## In progress
+## Built, pending hardware verification
 
-- **IMU expression redesign** — split params across the right sensor:
-  velocity (accel tilt, latched per note-on), vibrato depth → CC1 (the #1
-  mod-wheel use), pitch bend (gyro twist, done). Replaces the redundant
-  gx-amp / gy-volume pair. *(design agreed; implementation pending)*
+- **IMU expression** — velocity (accel tilt, latched per note-on), vibrato
+  depth → CC1 (gyro/accel side-tilt), pitch bend (gyro twist). Replaced the
+  redundant gx-amp / gy-volume pair.
+- **1-pole low-pass filter** — runtime, cutoff on `,` / `.` keys, open by
+  default. Tames bright saw/square; first step toward a cutoff-sweep mod source.
+- **Per-waveform loudness matching** — the four shapes leveled by ear.
 
 ## Planned
 
@@ -17,8 +19,6 @@ put things permanently out of scope are at the bottom.
   (single-cycle wavetable or one-shot). Turns the synth into a rough sampler.
   Needs: mic capture path, sample storage (RAM/flash/SD), and an oscillator mode
   that reads the captured buffer instead of `osc()`.
-- **1-pole lowpass filter** — cheap, feasible. Unlocks the #2 mod-wheel use
-  (CC1 / a gyro axis → cutoff sweep).
 - **2-op FM** (DX7-style) — feasible within the SR/CPU budget; adds metallic /
   bell timbres beyond the four basic waveforms.
 - **User-remappable MIDI CC** — let the player assign which gyro/accel axis
