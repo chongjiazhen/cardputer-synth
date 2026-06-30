@@ -179,3 +179,10 @@ Performance synth is genuinely usable by ~phase 3–4; jam box at 7; groovebox 8
   the groovebox phases need them.
 - **CPU/RAM budgeting** — measure per phase; this design assumes float32 + block
   rendering keep the per-sample cost within budget at 16 kHz.
+
+## Hardware inspirations
+
+- HiChord Pocket Synth
+- Gakken NSX-39 (Pocket Miku)
+- teenage engineering Pocket Operators
+- Omnichord
