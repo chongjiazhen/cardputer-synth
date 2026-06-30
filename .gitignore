@@ -17,3 +17,4 @@ secrets.h
 # AI harness local notes — machine-local, never ships public
 CLAUDE.local.md
 dist/
+.qwen/
