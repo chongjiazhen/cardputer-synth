@@ -20,14 +20,15 @@ the Mutable-Plaits approach, not one heavy engine.
 
 | Resource | Value | Consequence |
 |---|---|---|
-| CPU | 2× Xtensa LX7 @240 MHz | ~15 k cycles/sample @16 kHz across both cores |
-| FPU | single-precision only | **float32 in the audio path**; `double` is emulated (slow) |
+| CPU | 2× Xtensa LX7 @240 MHz, audio render single-core (`loop()`) | budget = CHUNK/SR wall time — **8000 µs per 256-sample block @32 kHz**; measured ~1500 µs/voice with the block-rate SVF |
+| FPU | single-precision only | **float32 in the audio path is mandatory, not a style choice** — a per-sample double-precision filter coefficient update starved the audio buffer on-device (soft-emulated trig); fixed by moving to float + block-rate coefficients |
 | SRAM | 512 KB, **no PSRAM** | sample/wavetable/delay buffers are tight; budget RAM |
 | Flash | 8 MB | firmware + small built-in tables; user data → SD |
 | Codec | ES8311 (shared mic + speaker) | **cannot record + play at once** — switch begin/end |
 | I/O | IMU (accel+gyro), microSD, RTC (RX8130), USB, BLE, IR, Grove | |
 
-Audio: 256-sample blocks, 16 kHz now; budget keeps headroom to try 32 kHz later.
+Audio: 256-sample blocks @ **32 kHz** (verified stable on device — see FPU row;
+filter coefficients recompute once per block, not per sample).
 
 ## Architecture layers
 
@@ -116,9 +117,11 @@ limit, accepted.
 ## Modules
 
 Pure, host-testable headers (Arduino-free, g++ + `*_test.cpp`):
-`oscillator.h`✓, `filter.h`✓ (extend to SVF), `adsr.h`✓, `lfo.h`, `modmatrix.h`,
-`voice.h`, `part.h`, `voicealloc.h`, `clock.h`, `sampler.h`✓, `fx_delay.h`,
-`fx_chorus.h`, `fx_shaper.h`, `sequencer.h`, `arp.h`, `patch.h` (serialize).
+`oscillator.h`✓ (PolyBLEP), `filter.h`✓ (resonant SVF), `adsr.h`✓, `lfo.h`✓,
+`modmatrix.h`✓, `voice.h`✓, `voicealloc.h`✓, `sampler.h`✓ (tape + granular
+pitch-shift), `arp.h`✓ — not yet built: `part.h`, `clock.h` (sample-accurate
+musical clock — see "Two clocks" below), `fx_delay.h`, `fx_chorus.h`,
+`fx_shaper.h`, `sequencer.h`, `patch.h` (serialize).
 
 Hardware glue (in `main.cpp` / `cardputer_hw`): audio I/O, mic capture + codec
 switch, SD, RTC, keyboard + Fn, display, MIDI USB/BLE.
@@ -127,9 +130,12 @@ switch, SD, RTC, keyboard + Fn, display, MIDI USB/BLE.
 
 - **2-octave keymap:** lower octave `z x c v b n m` + `s d g h j` (existing);
   upper `q w e r t y u` (white) + `2 3 5 6 7` (sharps over the gaps).
-- **Fn-layer:** number row now carries sharps, so all functions move to Fn+key
-  (lib exposes `keysState().fn`; expose it through `cardputer_hw`). **Verify
-  early on HW** that Fn+letter reports the letter (some Fn combos remap).
+- **Fn-layer:** number row now carries sharps, so all functions move to Fn+key.
+  `cardputer::fnHeld()` is implemented and in use (arp controls: `Fn+a/s/-/=`),
+  but the assumption behind it — Fn is a pure modifier and does not remap the
+  underlying letter — is still **unverified on hardware** (code compiles;
+  device wasn't flashed for this feature yet). Confirm on HW before extending
+  the 2-octave keymap on top of it.
 - **Modes:** PLAY (keys=notes, IMU=expression) · EDIT (tweak patch params,
   NVS-persisted) · SEQ / SONG (later). A mode key cycles; the screen shows mode.
 
@@ -146,6 +152,13 @@ switch, SD, RTC, keyboard + Fn, display, MIDI USB/BLE.
   Sample-accurate; the *only* tempo source for arp / looper / delay-sync.
 - **RTC** = wall-clock time only (display, timestamps). Never drives tempo.
 
+**Known deviation:** the shipped arp is clocked by `millis()`, not the sample
+counter — simplest thing that worked for a single event-rate timer. Fine
+standalone, but it means arp tempo can drift against the audio sample clock.
+Migrate it onto `clock.h`'s sample-accurate clock when the looper is built, so
+arp/looper/delay-sync genuinely share one clock as designed above, instead of
+each inventing its own timer.
+
 ## Testing strategy
 
 All DSP/logic lives in pure headers, host-tested with g++ (`*_test.cpp`), as
@@ -155,30 +168,40 @@ phase has a flash-gate before the next begins.
 
 ## Build phases (each shippable, flash-gated, v0.1.0 baseline preserved)
 
-1. **Engine → float32 + Voice[] / Part poly** (1 Part) → *polyphonic current synth*
-2. **Resonant SVF filter + env2 + 2 LFOs + mod-matrix** → *real sound design*
+1. ✅ **Engine → float32 + Voice[] / Part poly** (1 Part) → *polyphonic current synth*
+2. ✅ **Resonant SVF filter + env2 + 2 LFOs + mod-matrix** → *real sound design*
 3. **2-octave + Fn-layer + EDIT mode + preset save/load (SD/NVS)** → *editable, savable*
+   — `fnHeld()` built (unverified on HW, see Control/UI); rest not started.
 4. **Osc expansion: wavetable + 2–4 op FM + PWM + sync/ring-mod + sub/noise** → *timbral range*
-5. **Sampler (mic + SD) as a voice source** → *sampling*
+5. **◐ partial: Sampler (mic) as a voice source** → *sampling* — mic capture +
+   tape/granular pitch-shift shipped; SD storage not built (still RAM-only).
 6. **Master FX: delay / chorus / drive / bitcrush** (light reverb if RAM allows) → *FX*
-7. **Sample-clock + arp + looper** → *jam box* (performance complete)
+7. **◐ partial: Sample-clock + arp + looper** → *jam box* (performance complete)
+   — arp shipped (on `millis()`, see "Two clocks" above); sample-accurate
+   `clock.h` and looper not built.
 8. **Multi-Part + drum/sample Parts + step sequencer** → *groovebox*
 9. **Song mode (pattern chaining)** → *full groovebox*
 10. **MIDI in + clock sync + RTC + WAV export** → *I/O complete*
 
 Performance synth is genuinely usable by ~phase 3–4; jam box at 7; groovebox 8–9.
+Near-term priority order across these phases is tracked in
+[roadmap.md](../roadmap.md).
 
 ## Open decisions / risks
 
-- **Fn-combo reporting** (phase 3) — must confirm on hardware before committing
-  the keymap; fallback = a dedicated mode/shift key.
-- **Voice count under load** — 6 with per-voice SVF + sampler is the target
-  ceiling; re-measure on device, drop to 4 if cycles run short.
+- **Fn-combo reporting** (phase 3) — still needs an on-device confirmation
+  pass (see Control/UI); fallback = a dedicated mode/shift key.
+- **Voice count under load** — measured on device: a 3-note chord costs
+  ~6000 µs of the 8000 µs/block budget (~1500 µs/voice) with the block-rate
+  SVF. 6 voices simultaneously (~9000 µs) would exceed budget and underrun —
+  cap active voices, or decimate the filter further, before shipping a patch
+  that regularly stacks 6.
 - **Reverb** — RAM/CPU may not allow a good one; treat as optional in phase 6.
 - **Per-Part vs master FX** — master-only first (simpler); per-Part sends only if
   the groovebox phases need them.
-- **CPU/RAM budgeting** — measure per phase; this design assumes float32 + block
-  rendering keep the per-sample cost within budget at 16 kHz.
+- **CPU/RAM budgeting** — float32 + block-rate coefficient updates keep cost
+  within budget at **32 kHz** (measured, not just assumed — see FPU row above;
+  a double-precision per-sample filter previously starved the buffer).
 
 ## Hardware inspirations
 
