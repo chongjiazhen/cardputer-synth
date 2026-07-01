@@ -14,6 +14,7 @@
 //   -  / =          - volume down / up (step 16, 0..255)
 //   1 2 3 4         - waveform: Sine / Saw / Square / Tri
 //   5               - sampler: play the recorded mic sample
+//   8               - sampler pitch: tape (varispeed) / grain (pitch-shift)
 //   r               - record ~1s from the mic into the sampler
 //   ` (esc key)     - panic: kill all voices
 //   ,  / .          - filter cutoff down / up
@@ -103,6 +104,7 @@ static constexpr int SAMPLE_LEN = SR;     // ~1 second at SR
 static int16_t       g_sampleBuf[SAMPLE_LEN];
 static int           g_sampleLen   = 0;   // valid samples (0 = none recorded)
 static bool          g_samplerMode = false;  // true = voices play the sample
+static bool          g_samplerGrain = false; // sampler pitch: false=varispeed(tape), true=granular
 
 static float g_lastVel = 1.0f;   // velocity of the most recent note-on (for display)
 
@@ -120,7 +122,8 @@ static void redraw(const char* lastNote) {
   else                    snprintf(cut, sizeof(cut), "%dHz", (int)g_cutoff);
   char res[8];
   snprintf(res, sizeof(res), "%.1f", g_resonance);
-  const char* src = g_samplerMode ? "SMPL" : synth::shapeName(g_wave);
+  const char* src = g_samplerMode ? (g_samplerGrain ? "GRAN" : "TAPE")
+                                   : synth::shapeName(g_wave);
   const char* fmode = (g_filterMode == synth::FilterMode::LP) ? "LP"
                     : (g_filterMode == synth::FilterMode::HP) ? "HP" : "BP";
   M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel: %.2f\nvib: %.2f\n%s %s Q%s\nrndr:%luus/8000",
@@ -161,6 +164,7 @@ static void noteOn(char key, int semitone, uint8_t velocity) {
   v.baseResonance = (float)g_resonance;
   v.filter.reset();
   v.filterCtr    = 0;   // recompute filter coeffs on this voice's first sample
+  v.grain.reset(0.0f);  // restart granular cursors from the sample head
 
   // Default modulation routings (phase 2 baseline):
   //   Env2 → Filter cutoff (filter envelope opens the filter on attack)
@@ -190,7 +194,7 @@ static void renderChunk() {
     for (int vch = 0; vch < N_VOICES; vch++)
       bus += smpl
         ? synth::voiceSampleBuf(g_voices[vch], g_sampleBuf, g_sampleLen,
-                                (float)g_bendRatio, vibRatio, (double)SR)
+                                (float)g_bendRatio, vibRatio, (double)SR, g_samplerGrain)
         : synth::voiceSample(g_voices[vch], g_wave,
                              (float)g_bendRatio, vibRatio, (double)SR);
     g_buf[i] = synth::mixToInt16(bus, 1.0f, AMP);
@@ -312,6 +316,7 @@ void loop() {
     else if (c == '3') { g_wave = synth::WaveShape::Square; g_samplerMode = false; redraw("-"); }
     else if (c == '4') { g_wave = synth::WaveShape::Tri;    g_samplerMode = false; redraw("-"); }
     else if (c == '5') { if (g_sampleLen > 0) g_samplerMode = true; redraw("-"); }  // sampler
+    else if (c == '8') { g_samplerGrain = !g_samplerGrain; redraw("-"); }  // sampler pitch: tape/grain
     // filter cutoff: ',' down (more filtering), '.' up (toward open)
     else if (c == ',') {
       g_cutoff = g_cutoff * 0.7; if (g_cutoff < FC_MIN) g_cutoff = FC_MIN;

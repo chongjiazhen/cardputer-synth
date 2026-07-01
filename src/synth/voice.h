@@ -34,6 +34,7 @@ struct Voice {
   Lfo        lfo2;             // LFO 2
   SVFilter   filter;           // per-voice resonant SVF
   ModMatrix  mod;              // per-voice modulation routing
+  Grain      grain;            // granular pitch-shift state (grain sampler mode)
 
   // Base parameter values (before modulation)
   float      baseCutoff  = 8000.0f;  // Hz, default open
@@ -120,10 +121,12 @@ inline float voiceSample(Voice& v, WaveShape wave,
 }
 
 // Sampler variant: plays from a recorded buffer instead of the oscillator,
-// through the same filter/modulation path.
+// through the same filter/modulation path. `grainMode` selects granular
+// pitch-shift (pitch follows the note, length/speed fixed) vs varispeed
+// (pitch and speed coupled, tape-style).
 inline float voiceSampleBuf(Voice& v, const int16_t* buf, int len,
                              float bendRatio, float vibRatio,
-                             double sampleRate) {
+                             double sampleRate, bool grainMode = false) {
   if (!v.active) return 0.0f;
 
   float e1 = (float)v.env1.step();
@@ -163,11 +166,19 @@ inline float voiceSampleBuf(Voice& v, const int16_t* buf, int len,
 
   float s = 0.0f;
   if (len > 0) {
-    float rawSample = (float)sampleRead(buf, len, v.samplePos);
+    float pitch = v.sampleStep * bendRatio * vibRatio * pitchRatio;
+    float rawSample;
+    if (grainMode) {
+      // Time-base fixed at 1.0 (original length preserved), pitch = the note.
+      rawSample = v.grain.process(buf, len, 1.0f, pitch);
+    } else {
+      // Varispeed (tape): one cursor, pitch and speed coupled.
+      rawSample = (float)sampleRead(buf, len, v.samplePos);
+      v.samplePos += pitch;
+      if (v.samplePos >= (float)len) v.samplePos -= (float)len;
+    }
     float filtered = v.filter.process(rawSample);
     s = filtered * e1 * v.vel * ampMod;
-    v.samplePos += v.sampleStep * bendRatio * vibRatio * pitchRatio;
-    if (v.samplePos >= (float)len) v.samplePos -= (float)len;
   }
 
   if (!v.env1.active()) v.active = false;
