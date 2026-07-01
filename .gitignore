@@ -18,3 +18,9 @@ secrets.h
 CLAUDE.local.md
 dist/
 .qwen/
+
+# desktop harness — vendored dep (fetched by host/build.sh) + build output
+host/vendor/miniaudio.h
+host/desktop_synth
+host/desktop_synth.exe
+host/*.wav
