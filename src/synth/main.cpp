@@ -1,8 +1,11 @@
 // Synth — keyboard-driven tone generator on the Cardputer ADV. Hold a note key
 // and the tone sustains with an ADSR envelope; release it and the tone fades on
-// the release tail. Monophonic, last-note priority. Audio is streamed to the 1W
-// speaker in small chunks via M5.Speaker.playRaw(); the ADSR + gate math lives in
-// adsr.h (host-tested), note math in notes.h, oscillator in oscillator.h.
+// the release tail. Polyphonic (6-voice), now with per-voice resonant SVF filter,
+// dual envelopes, dual LFOs, and a modulation matrix (phase 2).
+//
+// Audio is streamed to the 1W speaker in small chunks via M5.Speaker.playRaw();
+// all DSP math lives in pure host-testable headers. Hardware glue (speaker
+// streaming, keyboard gate, IMU reads) lives here.
 //
 // Controls (Fn + key to wake keyboard):
 //   z x c v b n m  - white keys C D E F G A B (current octave)
@@ -13,7 +16,8 @@
 //   5               - sampler: play the recorded mic sample
 //   r               - record ~1s from the mic into the sampler
 //   ` (esc key)     - panic: kill all voices
-//   ,  / .          - low-pass cutoff down / up (toward open)
+//   ,  / .          - filter cutoff down / up
+//   6  / 7          - filter resonance down / up
 //   IMU accel tilt  - fwd/back → note velocity (latched at press); left/right
 //                     → vibrato depth (LFO on pitch, → CC1)
 //   IMU gyro twist  - gz → pitch bend (±2 semitones, self-centering wheel)
@@ -28,6 +32,7 @@
 #include "oscillator.h"
 #include "imu_map.h"
 #include "filter.h"
+#include "lfo.h"
 #include "voice.h"
 #include "voicealloc.h"
 #include "mixer.h"
@@ -63,11 +68,13 @@ static uint8_t g_vol    = 128;            // 0..255 (speaker output)
 // Waveform state
 static synth::WaveShape g_wave = synth::WaveShape::Sine;
 
-// Low-pass filter (runtime, ',' / '.' keys). Default open = no tone change.
-static constexpr double FC_MIN = 120.0;        // Hz
-static constexpr double FC_MAX = SR * 0.5;     // Nyquist → "open"/bypass
-static synth::OnePole g_filter;
-static double         g_cutoff = FC_MAX;        // start open
+// Per-voice filter defaults (runtime, ',' / '.' keys modify cutoff;
+// '6' / '7' modify resonance). Applied to new voices on note-on.
+static constexpr double FC_MIN = 120.0;
+static constexpr double FC_MAX = SR * 0.49;
+static double         g_cutoff = 2000.0;       // start partly closed so Env2→FilterCut is audible
+static double         g_resonance = 0.707;       // Butterworth default
+static synth::FilterMode g_filterMode = synth::FilterMode::LP;
 
 // IMU state. Sensor split: accel tilt (persists) → velocity + vibrato;
 // gyro rate (self-centers) → pitch bend.
@@ -75,7 +82,7 @@ static synth::ImuCalib g_calib;
 static float  g_tiltFwd     = 0.0f;  // last calibrated fwd/back tilt (for latch)
 static float  g_vibratoDepth = 0.0f; // 0..1, accel side-tilt → LFO depth
 static double g_bendRatio    = 1.0;  // gyro gz → pitch-bend freq ratio
-static double g_lfoPhase     = 0.0;  // vibrato LFO phase
+static double g_lfoPhase     = 0.0;  // vibrato LFO phase (legacy IMU LFO)
 static double g_lfoInc       = 0.0;  // set in setup from LFO_HZ / SR
 
 // MIDI last-sent tracking — only transmit on change (prevents controller floods).
@@ -97,8 +104,6 @@ static int16_t       g_sampleBuf[SAMPLE_LEN];
 static int           g_sampleLen   = 0;   // valid samples (0 = none recorded)
 static bool          g_samplerMode = false;  // true = voices play the sample
 
-// TWO_PI comes from Arduino.h (6.283185...).
-
 static float g_lastVel = 1.0f;   // velocity of the most recent note-on (for display)
 
 static void redraw(const char* lastNote) {
@@ -107,10 +112,14 @@ static void redraw(const char* lastNote) {
   char cut[12];
   if (g_cutoff >= FC_MAX) snprintf(cut, sizeof(cut), "open");
   else                    snprintf(cut, sizeof(cut), "%dHz", (int)g_cutoff);
+  char res[8];
+  snprintf(res, sizeof(res), "%.1f", g_resonance);
   const char* src = g_samplerMode ? "SMPL" : synth::shapeName(g_wave);
-  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel: %.2f\nvib: %.2f\ncut: %s",
+  const char* fmode = (g_filterMode == synth::FilterMode::LP) ? "LP"
+                    : (g_filterMode == synth::FilterMode::HP) ? "HP" : "BP";
+  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel: %.2f\nvib: %.2f\n%s %s Q%s",
                     g_octave, g_vol, lastNote,
-                    src, g_lastVel, g_vibratoDepth, cut);
+                    src, g_lastVel, g_vibratoDepth, fmode, cut, res);
 #ifdef SYNTH_USB_MIDI
   M5.Display.printf("\nUSB MIDI");
 #endif
@@ -132,13 +141,37 @@ static void noteOn(char key, int semitone, uint8_t velocity) {
   v.vel        = (float)velocity / 127.0f;
   v.samplePos  = 0.0f;                              // sampler: restart from head
   v.sampleStep = (float)synth::sampleStep(midi);    // sampler: pitch = playback rate
-  v.env.configMs(SR, 8.0, 40.0, 0.7, 120.0);
-  v.env.gateOn();
+
+  // Envelopes: env1 = amp, env2 = filter/mod
+  v.env1.configMs(SR, 8.0, 40.0, 0.7, 120.0);
+  v.env2.configMs(SR, 5.0, 80.0, 0.5, 200.0);
+  v.env1.gateOn();
+  v.env2.gateOn();
+
+  // Per-voice filter setup
+  v.filterMode   = g_filterMode;
+  v.baseCutoff   = (float)g_cutoff;
+  v.baseResonance = (float)g_resonance;
+  v.filter.reset();
+
+  // Default modulation routings (phase 2 baseline):
+  //   Env2 → Filter cutoff (filter envelope opens the filter on attack)
+  //   IMU vibrato is still handled externally via pitch bend
+  v.mod.clear();
+  v.mod.set(synth::ModSrc::Env2, synth::ModDst::FilterCut, 1.0f);
+
+  // LFOs: default off (depth=0); can be configured per patch later
+  v.lfo1.setFreq(5.5, (double)SR);
+  v.lfo1.depth = 0.0f;
+  v.lfo2.setFreq(0.5, (double)SR);
+  v.lfo2.depth = 0.0f;
+
   g_lastVel  = v.vel;
 }
 
-// Render one CHUNK: sum all active voices, apply the global vibrato LFO + pitch
-// bend (per voice) and the master low-pass + soft limiter (on the mix).
+// Render one CHUNK: sum all active voices, apply the per-voice SVF filter
+// (now inside voiceSample), the global vibrato LFO + pitch bend, and the
+// soft limiter on the mix. No master filter — filtering is per-voice.
 static void renderChunk() {
   for (size_t i = 0; i < CHUNK; i++) {
     float vibSemi  = g_vibratoDepth * synth::VIB_MAX_SEMITONES * sinf((float)g_lfoPhase);
@@ -148,9 +181,9 @@ static void renderChunk() {
     for (int vch = 0; vch < N_VOICES; vch++)
       bus += smpl
         ? synth::voiceSampleBuf(g_voices[vch], g_sampleBuf, g_sampleLen,
-                                (float)g_bendRatio, vibRatio)
-        : synth::voiceSample(g_voices[vch], g_wave, (float)g_bendRatio, vibRatio);
-    bus = (float)g_filter.process(bus);        // master low-pass (open = passthrough)
+                                (float)g_bendRatio, vibRatio, (double)SR)
+        : synth::voiceSample(g_voices[vch], g_wave,
+                             (float)g_bendRatio, vibRatio, (double)SR);
     g_buf[i] = synth::mixToInt16(bus, 1.0f, AMP);
     g_lfoPhase += g_lfoInc;
     if (g_lfoPhase >= TWO_PI) g_lfoPhase -= TWO_PI;
@@ -207,7 +240,6 @@ void setup() {
     if (cardputer::imuRead(raw)) g_calib = synth::calibrate(raw.ax, raw.ay, raw.gz);
   }
   g_lfoInc = TWO_PI * synth::LFO_HZ / SR;   // vibrato LFO step per sample
-  g_filter.setCutoff(g_cutoff, SR);         // open by default
   redraw("-");
 }
 
@@ -274,10 +306,27 @@ void loop() {
     // filter cutoff: ',' down (more filtering), '.' up (toward open)
     else if (c == ',') {
       g_cutoff = g_cutoff * 0.7; if (g_cutoff < FC_MIN) g_cutoff = FC_MIN;
-      g_filter.setCutoff(g_cutoff, SR); redraw("-");
+      // Update active voices' base cutoff
+      for (int i = 0; i < N_VOICES; i++)
+        if (g_voices[i].active) g_voices[i].baseCutoff = (float)g_cutoff;
+      redraw("-");
     } else if (c == '.') {
       g_cutoff = g_cutoff / 0.7; if (g_cutoff > FC_MAX) g_cutoff = FC_MAX;
-      g_filter.setCutoff(g_cutoff, SR); redraw("-");
+      for (int i = 0; i < N_VOICES; i++)
+        if (g_voices[i].active) g_voices[i].baseCutoff = (float)g_cutoff;
+      redraw("-");
+    }
+    // filter resonance: '6' down, '7' up
+    else if (c == '6') {
+      g_resonance *= 0.7; if (g_resonance < 0.1) g_resonance = 0.1;
+      for (int i = 0; i < N_VOICES; i++)
+        if (g_voices[i].active) g_voices[i].baseResonance = (float)g_resonance;
+      redraw("-");
+    } else if (c == '7') {
+      g_resonance /= 0.7; if (g_resonance > 20.0) g_resonance = 20.0;
+      for (int i = 0; i < N_VOICES; i++)
+        if (g_voices[i].active) g_voices[i].baseResonance = (float)g_resonance;
+      redraw("-");
     }
     // r = record a mic sample; ` (esc key) = panic, kill all voices
     else if (c == 'r') { recordSample(); }
@@ -293,7 +342,8 @@ void loop() {
     for (int i = 0; i < N_VOICES; i++) {
       synth::Voice& v = g_voices[i];
       if (v.active && v.key && !heldContains(held, v.key)) {
-        v.env.gateOff();
+        v.env1.gateOff();
+        v.env2.gateOff();
 #ifdef SYNTH_USB_MIDI
         usbMidi.sendNoteOff(v.midi, 0, 1);
 #endif
