@@ -48,6 +48,9 @@ performance synth without rewriting it.
 
 - **Voice** — one sounding note: oscillator(s) + per-voice envelope(s) +
   per-voice resonant filter + per-voice modulation. Bound to a Part while active.
+  Not yet built: optional per-voice **glide/portamento** (pitch eases toward a
+  new note instead of jumping) — a Patch-level setting, small addition to the
+  existing pitch-ratio math in `voice.h`.
 - **Part** — one timbre: owns a **Patch**, its allocated voices, and (later) a
   sequencer track. v1 = a single Part (the synth). Groovebox = N Parts (lead,
   bass, drums…).
@@ -141,7 +144,9 @@ switch, SD, RTC, keyboard + Fn, display, MIDI USB/BLE.
 
 ## I/O & storage
 
-- **MIDI in + out**, USB + BLE, with **clock sync** (master/slave).
+- **MIDI in + out**, USB + BLE, with **clock sync** (master/slave). Not yet
+  built: **user-remappable CC assignment** — which gyro/accel axis drives
+  which CC number, instead of the current fixed mapping (CC1 vibrato only).
 - **SD:** patches, samples, songs, WAV export.
 - **NVS (`Preferences`):** global settings + last state (survives reboot).
 - **RTC (RX8130):** clock display + SD-file timestamps. Never musical timing.
