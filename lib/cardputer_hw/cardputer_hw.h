@@ -27,6 +27,10 @@ std::vector<char> keysJustPressed();
 // Characters currently held down this frame (gate state, no edge filter).
 // Use with keysJustPressed() for press/release tracking (e.g. synth sustain).
 std::vector<char> keysHeld();
+// True while the Fn key is held. Fn does not remap letter keys — keysHeld()
+// still reports the plain character — so callers combine this with a
+// justPressed/held character to build Fn+key combos.
+bool fnHeld();
 // Convenience: blocking line input rendered to screen. Returns on Enter.
 String readLine(const String& prompt = "");
 

@@ -19,6 +19,10 @@
 //   ` (esc key)     - panic: kill all voices
 //   ,  / .          - filter cutoff down / up
 //   6  / 7          - filter resonance down / up
+//   Fn + a          - arpeggiator on/off (owns note lifecycle while on;
+//                     octave/waveform/filter/volume/record/panic still work)
+//   Fn + s          - cycle arp pattern: Up / Down / Up-Down / Random
+//   Fn + - / Fn + = - arp tempo slower / faster
 //   IMU accel tilt  - fwd/back → note velocity (latched at press); left/right
 //                     → vibrato depth (LFO on pitch, → CC1)
 //   IMU gyro twist  - gz → pitch bend (±2 semitones, self-centering wheel)
@@ -37,7 +41,10 @@
 #include "voice.h"
 #include "voicealloc.h"
 #include "mixer.h"
+#include "arp.h"
 #include <cmath>
+#include <vector>
+#include <algorithm>
 
 // --- USB MIDI (TinyUSB device + FortySevenEffects MIDI over it) ---
 #ifdef SYNTH_USB_MIDI
@@ -108,6 +115,17 @@ static bool          g_samplerGrain = false; // sampler pitch: false=varispeed(t
 
 static float g_lastVel = 1.0f;   // velocity of the most recent note-on (for display)
 
+// Arpeggiator (Fn+a toggle; owns note lifecycle for held note-keys while on).
+static bool             g_arpEnabled    = false;
+static synth::ArpState  g_arp;
+static unsigned int     g_arpIntervalMs = 200;   // ms between arp steps
+static unsigned long    g_lastArpTime   = 0;
+static char             g_arpCurrentKey = 0;     // key char of the sounding arp voice, 0=none
+static int              g_arpCurrentMidi = 0;
+static std::vector<std::pair<int,char>> g_arpNotes;   // (midi, key) sorted low->high
+static constexpr unsigned ARP_MIN_MS = 50;
+static constexpr unsigned ARP_MAX_MS = 1000;
+
 // DIAGNOSTIC: microseconds to render one CHUNK (budget = CHUNK/SR*1e6 = 8000µs
 // @256/32k). If this approaches/exceeds 8000, the audio buffer underruns →
 // "tch tch tch" dropouts. Shown on the display. Remove once perf is confirmed.
@@ -136,6 +154,8 @@ static void redraw(const char* lastNote) {
 #ifdef SYNTH_BLE_MIDI
   M5.Display.printf("\nBLE MIDI");
 #endif
+  if (g_arpEnabled)
+    M5.Display.printf("\nARP %s %ums", synth::arpModeName(g_arp.mode), g_arpIntervalMs);
 }
 
 // Allocate a voice for a key press at a semitone + velocity (0..127).
@@ -218,6 +238,40 @@ static void renderChunk() {
   M5.Speaker.playRaw(g_buf, CHUNK, SR, false, 1, 0);   // channel 0, no repeat
 }
 
+// Release the arp's currently-sounding voice + its MIDI note, if any.
+static void stopArpVoice() {
+  if (!g_arpCurrentKey) return;
+  int vi = synth::findVoiceByKey(g_voices, N_VOICES, g_arpCurrentKey);
+  if (vi >= 0) {
+    g_voices[vi].env1.gateOff();
+    g_voices[vi].env2.gateOff();
+    g_voices[vi].key = 0;
+  }
+#ifdef SYNTH_USB_MIDI
+  usbMidi.sendNoteOff(g_arpCurrentMidi, 0, 1);
+#endif
+#ifdef SYNTH_BLE_MIDI
+  MIDI.sendNoteOff(g_arpCurrentMidi, 0, 1);
+#endif
+  g_arpCurrentKey = 0;
+}
+
+// Rebuild the sorted held-note list from currently-held note keys; only reset
+// the arp's step position if the note composition actually changed (so
+// rapid re-scans of an unchanged chord don't restart the pattern each loop).
+static void rebuildArpNotesIfChanged(const std::vector<char>& held) {
+  std::vector<std::pair<int,char>> fresh;
+  for (char c : held) {
+    int s = synth::keyToSemitone(c);
+    if (s >= 0) fresh.emplace_back(synth::noteToMidi(s, g_octave), c);
+  }
+  std::sort(fresh.begin(), fresh.end());
+  if (fresh != g_arpNotes) {
+    g_arpNotes = fresh;
+    synth::arpReset(g_arp);
+  }
+}
+
 // True while any voice is still sounding (gate or release tail).
 static bool anyVoiceActive() {
   for (int i = 0; i < N_VOICES; i++) if (g_voices[i].active) return true;
@@ -288,9 +342,45 @@ void loop() {
   for (char c : nowPressed)
     if (!heldContains(g_prevPressed, c)) justPressed.push_back(c);
   g_prevPressed = nowPressed;
+
+  // --- Fn combos: arp controls. Checked (and consumed from justPressed)
+  // BEFORE normal key handling — 'a'/'s' would otherwise also fire as a note
+  // (keyToSemitone) and '-'/'=' as volume, since Fn does not remap letters. ---
+  if (cardputer::fnHeld()) {
+    auto consume = [&](char key) {
+      auto it = std::find(justPressed.begin(), justPressed.end(), key);
+      if (it == justPressed.end()) return false;
+      justPressed.erase(it);
+      return true;
+    };
+    if (consume('a')) {
+      g_arpEnabled = !g_arpEnabled;
+      if (g_arpEnabled) { synth::arpReset(g_arp); g_arpNotes.clear(); }
+      else               stopArpVoice();
+      redraw("-");
+    }
+    if (consume('s')) {
+      g_arp.mode = synth::nextArpMode(g_arp.mode);
+      synth::arpReset(g_arp);
+      redraw("-");
+    }
+    if (consume('-')) {
+      if (g_arpIntervalMs < ARP_MAX_MS) g_arpIntervalMs += 10;
+      redraw("-");
+    }
+    if (consume('=')) {
+      if (g_arpIntervalMs > ARP_MIN_MS) g_arpIntervalMs -= 10;
+      redraw("-");
+    }
+  }
+
   for (char c : justPressed) {
     int s = synth::keyToSemitone(c);
     if (s >= 0) {
+      // While the arp is on, it owns note lifecycle from the held-key set
+      // (rebuilt below from g_prevPressed) — a plain key edge doesn't trigger
+      // a voice directly.
+      if (g_arpEnabled) continue;
       // Latch velocity from the current fwd/back tilt (last IMU sample).
       uint8_t vel = synth::tiltVelocity(g_tiltFwd);
       noteOn(c, s, vel);
@@ -373,6 +463,9 @@ void loop() {
 #endif
         g_voices[i].active = false; g_voices[i].key = 0;
       }
+      g_arpCurrentKey = 0;   // arp's voice was just killed above; drop its handle too
+      synth::arpReset(g_arp);
+      g_arpNotes.clear();
       redraw("panic");
     }
   }
@@ -392,6 +485,40 @@ void loop() {
         MIDI.sendNoteOff(v.midi, 0, 1);
 #endif
         v.key = 0;   // no longer gated; env releases, then voice frees itself
+      }
+    }
+  }
+
+  // --- arpeggiator: clocked note generation from the held-key set. Owns note
+  // lifecycle for note-keys while enabled (suppressed above in the key loop).
+  if (g_arpEnabled) {
+    rebuildArpNotesIfChanged(g_prevPressed);
+
+    if (g_arpNotes.empty()) {
+      stopArpVoice();   // last chord key released — stop the sounding note
+    } else {
+      unsigned long now = millis();
+      if (now - g_lastArpTime >= g_arpIntervalMs) {
+        g_lastArpTime = now;
+        size_t idx = synth::arpStep(g_arp, g_arpNotes.size());
+        char key   = g_arpNotes[idx].second;
+        int  midi  = g_arpNotes[idx].first;
+        int  semi  = synth::keyToSemitone(key);
+
+        stopArpVoice();   // release the previous arp step's note first
+
+        uint8_t vel = synth::tiltVelocity(g_tiltFwd);
+        noteOn(key, semi, vel);
+        g_arpCurrentKey  = key;
+        g_arpCurrentMidi = midi;
+#ifdef SYNTH_USB_MIDI
+        usbMidi.sendNoteOn(midi, vel, 1);
+#endif
+#ifdef SYNTH_BLE_MIDI
+        MIDI.sendNoteOn(midi, vel, 1);
+#endif
+        snprintf(g_lastLabel, sizeof(g_lastLabel), "%s%d", synth::semitoneName(semi), g_octave);
+        redraw(g_lastLabel);
       }
     }
   }

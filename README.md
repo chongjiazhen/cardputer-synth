@@ -25,6 +25,9 @@ sampler, IMU tilt expression, and USB-MIDI + BLE-MIDI output.
   depth; gyro twist → pitch bend (self-centering); graceful no-op if IMU absent.
 - **MIDI out** — USB-MIDI and BLE-MIDI (device "Cardputer Synth"): note on/off
   with tilt velocity + CC 1 (vibrato) + pitch-bend.
+- **Arpeggiator** — `Fn+a` toggles it on; while on, held note-keys are
+  arpeggiated (Up / Down / Up-Down / Random, `Fn+s` cycles pattern, `Fn+-`/`Fn+=`
+  adjust tempo) instead of sounding directly. Sends MIDI note on/off per step.
 
 ## Controls
 
@@ -33,6 +36,8 @@ z x c v b n m   white notes       1-4  waveform          , .  cutoff down/up
 s d g h j       black notes       [ ]  octave down/up     6 7  resonance down/up
 - =  volume down/up               5    play sampler       8    tape / grain
 r    record ~1s from mic          `    panic (kill all)
+
+Fn+a  arp on/off      Fn+s  cycle arp pattern      Fn+-/Fn+=  arp tempo down/up
 ```
 IMU: tilt fwd/back → velocity · tilt left/right → vibrato · gyro twist → pitch bend.
 

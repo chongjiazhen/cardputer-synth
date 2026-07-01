@@ -36,6 +36,10 @@ std::vector<char> keysHeld() {
   return out;
 }
 
+bool fnHeld() {
+  return M5Cardputer.Keyboard.keysState().fn;
+}
+
 String readLine(const String& prompt) {
   String buf;
   M5.Display.fillScreen(TFT_BLACK);
