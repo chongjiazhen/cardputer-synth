@@ -1,6 +1,7 @@
 # Phase 1 — Polyphonic Engine Implementation Plan
 
-*Design record for phase 1 (completed). The live code is the source of truth.*
+*Design record for phase 1 (completed). Kept for history; the live code is the
+source of truth.*
 
 **Goal:** Convert the monophonic synth to a 6-voice polyphonic engine (float32 audio path) that plays chords, while keeping the v0.1.0 sound, controls, and on-device tunings unchanged.
 
