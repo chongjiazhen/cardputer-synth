@@ -39,7 +39,15 @@ struct Voice {
   float      baseCutoff  = 8000.0f;  // Hz, default open
   float      baseResonance = 0.707f; // Q, Butterworth default
   FilterMode filterMode = FilterMode::LP;
+
+  // Filter coeffs are recomputed only every FILTER_DECIM samples (not per
+  // sample) — tanf per sample per voice starves the ESP32-S3 audio buffer.
+  int        filterCtr  = 0;
 };
+
+// Recompute filter coefficients this sample? Decimate to ~2 kHz (every 16
+// samples at 32 kHz) — inaudible for cutoff sweeps, ~16× less trig.
+static constexpr int FILTER_DECIM = 16;
 
 // Render one sample for a voice and advance its state.
 // Uses the modulation matrix to route env1, env2, lfo1, lfo2, velocity,
@@ -70,25 +78,25 @@ inline float voiceSample(Voice& v, WaveShape wave,
   v.mod.process(src);
 
   // Apply modulations to parameters
-  // Pitch: base + mod offset (in semitones, scaled)
+  // Pitch: base + mod offset (in semitones, scaled). Skip pow() when unmodulated.
   float pitchMod = v.mod.get(ModDst::Pitch);
-  float pitchRatio = std::pow(2.0f, pitchMod / 12.0f);
+  float pitchRatio = (pitchMod != 0.0f) ? std::pow(2.0f, pitchMod / 12.0f) : 1.0f;
 
-  // Filter cutoff: base + mod offset (in Hz, additive)
-  float cutoffMod = v.mod.get(ModDst::FilterCut) * 4000.0f;  // ±4000 Hz range
-  float cutoff = v.baseCutoff + cutoffMod;
-  if (cutoff < 20.0f) cutoff = 20.0f;
-  if (cutoff > sampleRate * 0.49) cutoff = sampleRate * 0.49f;
+  // Filter coefficients: expensive (tanf) — recompute only every FILTER_DECIM
+  // samples, not per sample (see FILTER_DECIM). Cutoff/res mod still tracks.
+  if ((v.filterCtr++ % FILTER_DECIM) == 0) {
+    float cutoffMod = v.mod.get(ModDst::FilterCut) * 4000.0f;  // ±4000 Hz range
+    float cutoff = v.baseCutoff + cutoffMod;
+    if (cutoff < 20.0f) cutoff = 20.0f;
+    if (cutoff > sampleRate * 0.49) cutoff = sampleRate * 0.49f;
 
-  // Filter resonance: base + mod offset
-  float resMod = v.mod.get(ModDst::FilterRes) * 5.0f;  // ±5 Q range
-  float resonance = v.baseResonance + resMod;
-  if (resonance < 0.1f) resonance = 0.1f;
-  if (resonance > 20.0f) resonance = 20.0f;
+    float resMod = v.mod.get(ModDst::FilterRes) * 5.0f;  // ±5 Q range
+    float resonance = v.baseResonance + resMod;
+    if (resonance < 0.1f) resonance = 0.1f;
+    if (resonance > 20.0f) resonance = 20.0f;
 
-  // Update filter coefficients (only when cutoff/res changes significantly;
-  // for simplicity we recompute every sample — cheap for biquad)
-  v.filter.calcCoeffs(v.filterMode, cutoff, resonance, sampleRate);
+    v.filter.calcCoeffs(v.filterMode, cutoff, resonance, (float)sampleRate);
+  }
 
   // Amp: env1 × velocity × mod offset
   float ampMod = 1.0f + v.mod.get(ModDst::Amp);
@@ -99,7 +107,7 @@ inline float voiceSample(Voice& v, WaveShape wave,
   float inc = v.phaseInc * bendRatio * vibRatio * pitchRatio;
   float dt  = inc / TWO_PI_F;
   float oscOut = osc(wave, v.phase, dt) * shapeGain(wave);
-  float filtered = (float)v.filter.process((double)oscOut);
+  float filtered = v.filter.process(oscOut);
   float s = filtered * e1 * v.vel * ampMod;
 
   // Advance oscillator phase
@@ -134,19 +142,21 @@ inline float voiceSampleBuf(Voice& v, const int16_t* buf, int len,
   v.mod.process(src);
 
   float pitchMod = v.mod.get(ModDst::Pitch);
-  float pitchRatio = std::pow(2.0f, pitchMod / 12.0f);
+  float pitchRatio = (pitchMod != 0.0f) ? std::pow(2.0f, pitchMod / 12.0f) : 1.0f;
 
-  float cutoffMod = v.mod.get(ModDst::FilterCut) * 4000.0f;
-  float cutoff = v.baseCutoff + cutoffMod;
-  if (cutoff < 20.0f) cutoff = 20.0f;
-  if (cutoff > sampleRate * 0.49) cutoff = sampleRate * 0.49f;
+  if ((v.filterCtr++ % FILTER_DECIM) == 0) {
+    float cutoffMod = v.mod.get(ModDst::FilterCut) * 4000.0f;
+    float cutoff = v.baseCutoff + cutoffMod;
+    if (cutoff < 20.0f) cutoff = 20.0f;
+    if (cutoff > sampleRate * 0.49) cutoff = sampleRate * 0.49f;
 
-  float resMod = v.mod.get(ModDst::FilterRes) * 5.0f;
-  float resonance = v.baseResonance + resMod;
-  if (resonance < 0.1f) resonance = 0.1f;
-  if (resonance > 20.0f) resonance = 20.0f;
+    float resMod = v.mod.get(ModDst::FilterRes) * 5.0f;
+    float resonance = v.baseResonance + resMod;
+    if (resonance < 0.1f) resonance = 0.1f;
+    if (resonance > 20.0f) resonance = 20.0f;
 
-  v.filter.calcCoeffs(v.filterMode, cutoff, resonance, sampleRate);
+    v.filter.calcCoeffs(v.filterMode, cutoff, resonance, (float)sampleRate);
+  }
 
   float ampMod = 1.0f + v.mod.get(ModDst::Amp);
   if (ampMod < 0.0f) ampMod = 0.0f;
@@ -154,7 +164,7 @@ inline float voiceSampleBuf(Voice& v, const int16_t* buf, int len,
   float s = 0.0f;
   if (len > 0) {
     float rawSample = (float)sampleRead(buf, len, v.samplePos);
-    float filtered = (float)v.filter.process((double)rawSample);
+    float filtered = v.filter.process(rawSample);
     s = filtered * e1 * v.vel * ampMod;
     v.samplePos += v.sampleStep * bendRatio * vibRatio * pitchRatio;
     if (v.samplePos >= (float)len) v.samplePos -= (float)len;

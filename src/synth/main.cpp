@@ -106,6 +106,12 @@ static bool          g_samplerMode = false;  // true = voices play the sample
 
 static float g_lastVel = 1.0f;   // velocity of the most recent note-on (for display)
 
+// DIAGNOSTIC: microseconds to render one CHUNK (budget = CHUNK/SR*1e6 = 8000µs
+// @256/32k). If this approaches/exceeds 8000, the audio buffer underruns →
+// "tch tch tch" dropouts. Shown on the display. Remove once perf is confirmed.
+static uint32_t g_renderUs = 0;
+static char     g_lastLabel[8] = "-";   // last note label, for live redraws
+
 static void redraw(const char* lastNote) {
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setCursor(0, 0);
@@ -117,9 +123,10 @@ static void redraw(const char* lastNote) {
   const char* src = g_samplerMode ? "SMPL" : synth::shapeName(g_wave);
   const char* fmode = (g_filterMode == synth::FilterMode::LP) ? "LP"
                     : (g_filterMode == synth::FilterMode::HP) ? "HP" : "BP";
-  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel: %.2f\nvib: %.2f\n%s %s Q%s",
+  M5.Display.printf("SYNTH\noct %d  vol %d\nlast: %s\nwave: %s\nvel: %.2f\nvib: %.2f\n%s %s Q%s\nrndr:%luus/8000",
                     g_octave, g_vol, lastNote,
-                    src, g_lastVel, g_vibratoDepth, fmode, cut, res);
+                    src, g_lastVel, g_vibratoDepth, fmode, cut, res,
+                    (unsigned long)g_renderUs);
 #ifdef SYNTH_USB_MIDI
   M5.Display.printf("\nUSB MIDI");
 #endif
@@ -153,6 +160,7 @@ static void noteOn(char key, int semitone, uint8_t velocity) {
   v.baseCutoff   = (float)g_cutoff;
   v.baseResonance = (float)g_resonance;
   v.filter.reset();
+  v.filterCtr    = 0;   // recompute filter coeffs on this voice's first sample
 
   // Default modulation routings (phase 2 baseline):
   //   Env2 → Filter cutoff (filter envelope opens the filter on attack)
@@ -173,6 +181,7 @@ static void noteOn(char key, int semitone, uint8_t velocity) {
 // (now inside voiceSample), the global vibrato LFO + pitch bend, and the
 // soft limiter on the mix. No master filter — filtering is per-voice.
 static void renderChunk() {
+  uint32_t t0 = micros();
   for (size_t i = 0; i < CHUNK; i++) {
     float vibSemi  = g_vibratoDepth * synth::VIB_MAX_SEMITONES * sinf((float)g_lfoPhase);
     float vibRatio = 1.0f + vibSemi * 0.0577623f;
@@ -188,6 +197,7 @@ static void renderChunk() {
     g_lfoPhase += g_lfoInc;
     if (g_lfoPhase >= TWO_PI) g_lfoPhase -= TWO_PI;
   }
+  g_renderUs = micros() - t0;                          // render cost for CHUNK
   M5.Speaker.playRaw(g_buf, CHUNK, SR, false, 1, 0);   // channel 0, no repeat
 }
 
@@ -274,9 +284,8 @@ void loop() {
 #ifdef SYNTH_BLE_MIDI
       MIDI.sendNoteOn(midiNote, vel, 1);
 #endif
-      char label[8];
-      snprintf(label, sizeof(label), "%s%d", synth::semitoneName(s), g_octave);
-      redraw(label);
+      snprintf(g_lastLabel, sizeof(g_lastLabel), "%s%d", synth::semitoneName(s), g_octave);
+      redraw(g_lastLabel);
       continue;
     }
     // octave controls
@@ -390,6 +399,15 @@ void loop() {
   // --- keep the speaker fed while the voice is sounding (incl. release tail) ---
   while (anyVoiceActive() && M5.Speaker.isPlaying(0) < 2) {
     renderChunk();
+  }
+
+  // DIAGNOSTIC: refresh the render-µs readout ~3x/sec while sounding.
+  {
+    static uint32_t lastDraw = 0;
+    if (anyVoiceActive() && millis() - lastDraw > 300) {
+      lastDraw = millis();
+      redraw(g_lastLabel);
+    }
   }
 
   delay(1);

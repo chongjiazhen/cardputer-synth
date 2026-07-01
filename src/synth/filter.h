@@ -1,12 +1,15 @@
-// Resonant State Variable Filter — biquad implementation.
+// Resonant State Variable Filter — TPT (topology-preserving transform) form.
 // Pure math, no Arduino/M5 includes — host-testable.
 //
-// Uses the Audio EQ Cookbook (RBJ) direct form II transposed biquad.
-// Provides LP / HP / BP via coefficient rotation — all outputs share the
-// same state so only one filter object is needed per voice.
+// Andy Simper / Cytomic "trapezoidal SVF" (see cytomic.com technical papers;
+// Vadim Zavalishin, The Art of VA Filter Design). Chosen over the RBJ cookbook
+// biquad because it is FLOAT and needs only ONE transcendental (tanf) per
+// coefficient update — the ESP32-S3 has a single-precision FPU and no hardware
+// double, so double-precision cos/sin per sample starved the audio buffer.
 //
-// DC gain = 1.0 for LP, 0.0 for HP and BP (verified analytically).
-// Resonance peaks at cutoff; Q > 0.707 gives emphasis, Q → ∞ → self-osc.
+// LP / HP / BP share the same integrator state (ic1, ic2). DC gain = 1.0 for LP,
+// 0.0 for HP and BP. Q is the usual resonance: Q = 0.707 = Butterworth (flat),
+// higher Q → resonant peak at cutoff, Q → ∞ → self-oscillation.
 #pragma once
 #ifndef M_PI
 #  define M_PI 3.14159265358979323846
@@ -18,63 +21,47 @@ namespace synth {
 enum class FilterMode { LP, HP, BP };
 
 struct SVFilter {
-  // State (direct form II transposed — two delay lines)
-  double z1 = 0.0;
-  double z2 = 0.0;
+  // Integrator state (two delay lines)
+  float ic1 = 0.0f;
+  float ic2 = 0.0f;
 
   // Coefficients (set by calcCoeffs)
-  double b0 = 0.0, b1 = 0.0, b2 = 0.0;
-  double a1 = 0.0, a2 = 0.0;  // normalized so a0 = 1
+  float g  = 0.0f;   // prewarped integrator gain, tan(pi*fc/fs)
+  float k  = 0.0f;   // damping = 1/Q
+  float a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+  FilterMode mode = FilterMode::LP;
 
   // Compute coefficients for a given mode, cutoff, Q, and sample rate.
-  // Q = 0.707 = Butterworth (flat passband, no resonance peak).
-  // Q > 0.707 → resonant peak at cutoff; Q ~10+ → near self-oscillation.
-  void calcCoeffs(FilterMode mode, double freq_hz, double q, double sample_rate) {
-    double w0 = 2.0 * M_PI * freq_hz / sample_rate;
-    double cos_w0 = std::cos(w0);
-    double sin_w0 = std::sin(w0);
-    double alpha = sin_w0 / (2.0 * q);
+  // Q = 0.707 = Butterworth; Q > 0.707 → resonant; Q ~10+ → near self-osc.
+  void calcCoeffs(FilterMode m, float freq_hz, float q, float sample_rate) {
+    if (freq_hz < 20.0f) freq_hz = 20.0f;
+    float ny = sample_rate * 0.49f;
+    if (freq_hz > ny) freq_hz = ny;
+    if (q < 0.05f) q = 0.05f;               // guard k = 1/q
 
+    g  = std::tan((float)M_PI * freq_hz / sample_rate);
+    k  = 1.0f / q;                          // higher Q → smaller k → resonant
+    a1 = 1.0f / (1.0f + g * (g + k));
+    a2 = g * a1;
+    a3 = g * a2;
+    mode = m;
+  }
+
+  // Process one sample (trapezoidal / TPT state update).
+  float process(float input) {
+    float v3 = input - ic2;
+    float v1 = a1 * ic1 + a2 * v3;
+    float v2 = ic2 + a2 * ic1 + a3 * v3;
+    ic1 = 2.0f * v1 - ic1;
+    ic2 = 2.0f * v2 - ic2;
     switch (mode) {
-      case FilterMode::LP: {
-        double norm = 1.0 + alpha;
-        b0 =  (1.0 - cos_w0) / 2.0 / norm;
-        b1 =  (1.0 - cos_w0)        / norm;
-        b2 =  (1.0 - cos_w0) / 2.0 / norm;
-        a1 = -2.0 * cos_w0          / norm;
-        a2 =  (1.0 - alpha)          / norm;
-        break;
-      }
-      case FilterMode::HP: {
-        double norm = 1.0 + alpha;
-        b0 =  (1.0 + cos_w0) / 2.0 / norm;
-        b1 = -(1.0 + cos_w0)        / norm;
-        b2 =  (1.0 + cos_w0) / 2.0 / norm;
-        a1 = -2.0 * cos_w0          / norm;
-        a2 =  (1.0 - alpha)          / norm;
-        break;
-      }
-      case FilterMode::BP: {
-        double norm = 1.0 + alpha;
-        b0 =  alpha             / norm;
-        b1 =  0.0;
-        b2 = -alpha             / norm;
-        a1 = -2.0 * cos_w0      / norm;
-        a2 =  (1.0 - alpha)     / norm;
-        break;
-      }
+      case FilterMode::HP: return input - k * v1 - v2;
+      case FilterMode::BP: return v1;
+      default:             return v2;       // LP
     }
   }
 
-  // Process one sample through the biquad (direct form II transposed).
-  double process(double input) {
-    double out = b0 * input + z1;
-    z1 = b1 * input - a1 * out + z2;
-    z2 = b2 * input - a2 * out;
-    return out;
-  }
-
-  void reset() { z1 = 0.0; z2 = 0.0; }
+  void reset() { ic1 = 0.0f; ic2 = 0.0f; }
 };
 
 }  // namespace synth

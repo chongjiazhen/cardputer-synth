@@ -109,9 +109,11 @@ int main() {
     f.process(1.0);
     f.process(1.0);
     f.reset();
-    // After reset, first sample on impulse should equal b0
+    // Reset zeroes the integrator state; a fresh impulse then rings from zero.
+    check(f.ic1 == 0.0f && f.ic2 == 0.0f, "Reset clears state");
+    // First LP impulse output from cleared state is a3 (v2 = a3*x, ic=0).
     double out = f.process(1.0);
-    check(near(out, f.b0, 1e-10), "Reset clears state");
+    check(near(out, f.a3, 1e-6), "First impulse == a3 after reset");
   }
 
   // --- Test 8: cutoff frequency scaling ---
