@@ -3,44 +3,67 @@
 Feasible, not-yet-built features, roughly in priority order. Hardware limits that
 put things permanently out of scope are at the bottom.
 
-## Built, pending hardware verification
+## Shipped
 
-- **IMU expression** — velocity (accel tilt, latched per note-on), vibrato
-  depth → CC1 (gyro/accel side-tilt), pitch bend (gyro twist). Replaced the
-  redundant gx-amp / gy-volume pair.
-- **1-pole low-pass filter** — runtime, cutoff on `,` / `.` keys, open by
-  default. Tames bright saw/square; first step toward a cutoff-sweep mod source.
-- **Per-waveform loudness matching** — the four shapes leveled by ear.
+- **Polyphonic engine** — 6-voice pool, oldest-voice stealing, MIDI note-off
+  correctly released on steal + panic (no stuck notes on external gear).
+- **Per-voice resonant filter** — state-variable filter (LP/HP/BP), runtime
+  cutoff (`,`/`.`) and resonance (`6`/`7`); coefficients decimated to block
+  rate so it doesn't starve the audio buffer.
+- **Dual envelopes, dual LFOs, modulation matrix** — env/LFO/velocity/key-track
+  routable to pitch, cutoff, resonance, and amp.
+- **Anti-aliased oscillators** — saw/square are PolyBLEP band-limited (the
+  naive versions aliased hard at this sample rate).
+- **Mic sampler, tape + granular pitch-shift** — record ~1 s from the mic;
+  play it back either varispeed (pitch/speed coupled) or granular (pitch
+  follows the note, length/speed independent).
+- **IMU expression** — accel tilt → velocity (latched) + vibrato depth; gyro
+  twist → self-centering pitch bend.
+- **MIDI out** — USB-MIDI and BLE-MIDI: note on/off, CC1 (vibrato), pitch bend.
+- **Arpeggiator** — `Fn+a` toggle, Up/Down/Up-Down/Random (`Fn+s`), tempo
+  (`Fn+-`/`Fn+=`); owns note lifecycle from the held-key set while active.
+- **Desktop audio harness** (`host/`) — play the synth on a PC for fast
+  by-ear iteration without a flash cycle.
+
+All of the above is host-tested (`src/synth/*_test.cpp`, plain g++) and
+compiles across all three build envs (`synth`, `synth-usb-midi`,
+`synth-ble-midi`). Flash-verification per feature tracked in
+[hardware-verification.md](hardware-verification.md).
 
 ## Planned
 
-- **Sample recording via mic** — the ADV has a MEMS mic + ES8311 ADC. Record a
-  short sample on-device, store it, and play it back as the oscillator source
-  (single-cycle wavetable or one-shot). Turns the synth into a rough sampler.
-  Needs: mic capture path, sample storage (RAM/flash/SD), and an oscillator mode
-  that reads the captured buffer instead of `osc()`.
-- **Arpeggiator** — hold keys → auto-cycle them (up / down / up-down / random)
-  at a clock rate. Cheap, very playable standalone. Pure event logic, no DSP
-  cost.
-- **Looper / step sequencer** — record note *events* (not audio) to RAM, loop
-  them, play live on top. Cheap (events are tiny). Turns the synth into a
-  self-contained jam box. Arp + looper share one internal clock — build the
-  clock once, both ride it (a metronome falls out of the same clock).
-- **2-op FM** (DX7-style) — feasible within the SR/CPU budget; adds metallic /
-  bell timbres beyond the four basic waveforms.
+- **SD save/load (patches + patterns)** — everything is RAM-only today;
+  power off and it's gone. Serialize a `Patch` (osc/filter/env/LFO/mod-matrix
+  state) to a file on SD, load it back. Highest-value gap — makes the
+  instrument feel like an instrument instead of a toy that forgets itself.
+- **Per-note slide / portamento** — a glide time between consecutive notes on
+  a voice, instead of an instant pitch jump. Small: one glide-rate constant +
+  a per-voice "target pitch" that eases toward the new note.
+- **Master FX send (delay / chorus / drive)** — one or two send effects on the
+  summed bus. Currently the only "effect" is the soft limiter; this is the
+  biggest lever left on richness/warmth without touching the engine itself.
+- **Step sequencer + song mode** — record a pattern of note events (not
+  audio) per track, loop it, chain patterns into a song. Turns the synth into
+  a self-contained groovebox rather than a played-live instrument only.
+- **2-op FM** — feasible in the CPU/SR budget; adds metallic/bell/e-piano
+  timbres beyond the four subtractive waveforms.
+- **On-device parameter editing + NVS persistence** — an edit mode to tune
+  values that are compile-time constants today (vibrato depth/rate,
+  per-waveform loudness gains, ADSR times, filter range, IMU sensitivity,
+  bend range, arp tempo range) and persist them across reboots. The natural
+  home for everything currently dialed in by reflash.
 - **User-remappable MIDI CC** — let the player assign which gyro/accel axis
   drives which CC, instead of the fixed mapping.
-- **On-device parameter editing** — a settings/edit mode on the Cardputer to
-  tune the values that are compile-time constants today (vibrato depth + LFO
-  rate, per-waveform loudness gains, ADSR, filter range, IMU tilt sensitivity,
-  pitch-bend range) and **persist** them across reboots via ESP32 NVS /
-  `Preferences`. The natural home for everything currently dialed in by reflash.
+- **Looper** — record a live performance (note events, not audio) and play it
+  back layered under new playing. Shares the arp's clock/timing plumbing.
 
 ## Permanently out of scope
 
-ESP32-S3 has no SIMD and runs at 16 kHz here. Vital/Surge-class DSP — spectral
-warping, large mod matrices, ZDF filters, polyphony > 2 — is not feasible. See
-the host-side constraints in the project notes.
+ESP32-S3 has no SIMD and a single-precision FPU only (double-precision DSP is
+software-emulated and too slow for the audio path — learned the hard way when
+a per-sample double-precision filter starved the buffer). Running at 32 kHz.
+Vital/Surge-class DSP — spectral warping, large wavetables, ZDF filters,
+polyphony beyond what fits the per-sample budget here — is not feasible.
 
 ## Verifying on hardware
 
