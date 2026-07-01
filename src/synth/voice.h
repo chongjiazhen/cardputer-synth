@@ -94,13 +94,16 @@ inline float voiceSample(Voice& v, WaveShape wave,
   float ampMod = 1.0f + v.mod.get(ModDst::Amp);
   if (ampMod < 0.0f) ampMod = 0.0f;
 
-  // Render oscillator → filter → amp
-  float oscOut = osc(wave, v.phase) * shapeGain(wave);
+  // Render oscillator → filter → amp. PolyBLEP anti-aliasing needs the
+  // per-sample phase advance (normalized to one cycle) as dt.
+  float inc = v.phaseInc * bendRatio * vibRatio * pitchRatio;
+  float dt  = inc / TWO_PI_F;
+  float oscOut = osc(wave, v.phase, dt) * shapeGain(wave);
   float filtered = (float)v.filter.process((double)oscOut);
   float s = filtered * e1 * v.vel * ampMod;
 
   // Advance oscillator phase
-  v.phase += v.phaseInc * bendRatio * vibRatio * pitchRatio;
+  v.phase += inc;
   if (v.phase >= TWO_PI_F) v.phase -= TWO_PI_F;
 
   // Voice goes inactive when amp envelope finishes

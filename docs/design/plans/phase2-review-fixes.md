@@ -4,9 +4,39 @@ Action plan for a coding agent to resolve findings from the Phase 2 (SVF +
 mod-matrix + LFO) review. Each task is independent unless noted. Verify with the
 host tests after each task: `g++ -std=c++17 src/synth/<name>_test.cpp -o t && ./t`.
 
-Context: all four host suites (`filter`, `lfo`, `modmatrix`, `voice`) currently
+Context: all host suites (`oscillator`, `filter`, `lfo`, `modmatrix`, `voice`)
 build and pass. Do not regress them. Pure-logic headers must stay free of
 Arduino/M5 includes (host-testable invariant).
+
+---
+
+## Task 0 — PolyBLEP anti-aliased Saw/Square  ✅ DONE
+
+**Files:** `src/synth/oscillator.h`, `src/synth/voice.h`, `oscillator_test.cpp`
+
+**Was:** naive Saw (`2t-1`) and Square (hard step) had unbounded harmonics →
+hard aliasing at 32 kHz → the harsh, buzzy tone (confirmed by ear A/B vs GLIDE,
+which uses band-limited wavetables). This was the dominant harshness source —
+NOT the filter. Sine/Tri were fine (Tri rolls off 1/n²).
+
+**Done:** added `polyBlep(t, dt)` (two-sample Välimäki/Huovilainen kernel) and a
+3rd `dt` arg to `osc()` (defaulted 0 = naive, backward-compatible). Saw subtracts
+one BLEP at the wrap; Square corrects both edges. `voice.h` passes
+`dt = inc/2π` (inc = the modulated per-sample phase advance). Sine/Tri unchanged.
+
+**Edge bug fixed during impl:** Square's falling-edge phase was `t+0.5`, which
+rounds to exactly `1.0f` at `t≈0.5` (phase=π), wraps to `0.0`, and misapplies the
+rising-edge residual → output spiked to 2.0. Changed to `t-0.5` (past-the-edge
+distance) which rounds consistently. Caught by the bounds assertion.
+
+**Verified:** `oscillator_test.cpp` adds (a) dt=0 byte-identical to naive
+(back-compat), (b) output bounded <1.25, (c) a mini-DFT that measures
+inharmonic/alias energy and asserts PolyBLEP cuts it >50% vs naive for both saw
+and square. All suites green.
+
+**Follow-up (optional):** Tri stays naive; if it ever sounds harsh at high notes,
+band-limit it via a leaky-integrated BLAMP of the square (adds one state var).
+Not needed now.
 
 ---
 

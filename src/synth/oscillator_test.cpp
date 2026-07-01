@@ -6,13 +6,49 @@
 #include <cstdlib>
 #include <cmath>
 #include <string>
+#include <vector>
+
+#ifndef M_PI
+#  define M_PI 3.14159265358979323846
+#endif
 
 using synth::WaveShape;
 using synth::osc;
+using synth::polyBlep;
 using synth::shapeName;
 using synth::shapeGain;
 using synth::PI_F;
 using synth::TWO_PI_F;
+
+// Render N samples of `shape` at frequency f (Hz) and sample rate sr, then sum
+// the DFT power in bins that are NOT harmonics of the fundamental — i.e. the
+// aliased/inharmonic energy a non-band-limited oscillator folds back below
+// Nyquist. `blep` selects PolyBLEP (dt>0) vs naive (dt=0). f is chosen to land
+// exactly on a DFT bin (f = fund_bin * sr / N) so harmonics fall on integer bins.
+static double aliasEnergy(WaveShape shape, double f, double sr, int N, bool blep) {
+  std::vector<float> x(N);
+  double phase = 0.0;
+  double inc   = TWO_PI_F * f / sr;
+  float  dt    = blep ? (float)(f / sr) : 0.0f;
+  for (int n = 0; n < N; n++) {
+    x[n] = osc(shape, (float)phase, dt);
+    phase += inc;
+    if (phase >= TWO_PI_F) phase -= TWO_PI_F;
+  }
+  int fund = (int)std::lround(f * N / sr);   // fundamental bin index
+  double alias = 0.0;
+  for (int k = 1; k < N / 2; k++) {
+    if (k % fund == 0) continue;             // skip true harmonics
+    double re = 0.0, im = 0.0;
+    for (int n = 0; n < N; n++) {
+      double a = 2.0 * M_PI * k * n / N;
+      re += x[n] * std::cos(a);
+      im -= x[n] * std::sin(a);
+    }
+    alias += re * re + im * im;
+  }
+  return alias;
+}
 
 static void check(bool cond, const char* msg) {
   if (!cond) {
@@ -63,6 +99,41 @@ int main() {
   check(std::string(shapeName(WaveShape::Saw))    == "SAW",  "name Saw");
   check(std::string(shapeName(WaveShape::Square)) == "SQR",  "name Square");
   check(std::string(shapeName(WaveShape::Tri))    == "TRI",  "name Tri");
+
+  // --- PolyBLEP: dt==0 is byte-identical to the old naive path (back-compat) ---
+  {
+    for (float ph = 0.0f; ph < TWO_PI_F; ph += 0.013f) {
+      check(osc(WaveShape::Saw, ph, 0.0f)    == osc(WaveShape::Saw, ph),    "saw dt=0 == naive");
+      check(osc(WaveShape::Square, ph, 0.0f) == osc(WaveShape::Square, ph), "sqr dt=0 == naive");
+    }
+    // polyBlep is a no-op away from an edge and disabled at dt<=0.
+    check(polyBlep(0.5f, 0.01f) == 0.0f, "blep zero mid-cycle");
+    check(polyBlep(0.5f, 0.0f)  == 0.0f, "blep disabled at dt=0");
+  }
+
+  // --- PolyBLEP: band-limited saw/square stay bounded (no BLEP overshoot blowup) ---
+  {
+    const double sr = 32000.0, f = 3000.0;
+    for (int n = 0; n < 512; n++) {
+      float ph = std::fmod((float)(TWO_PI_F * f / sr * n), TWO_PI_F);
+      float dt = (float)(f / sr);
+      check(std::fabs(osc(WaveShape::Saw, ph, dt))    < 1.25f, "blep saw bounded");
+      check(std::fabs(osc(WaveShape::Square, ph, dt)) < 1.25f, "blep sqr bounded");
+    }
+  }
+
+  // --- PolyBLEP: cuts aliased/inharmonic energy vs the naive oscillator ---
+  {
+    const double sr = 32000.0, f = 3000.0;   // 3 kHz saw/sqr aliases hard @32k
+    const int N = 320;                       // bin width 100 Hz → f on bin 30
+    double sawNaive = aliasEnergy(WaveShape::Saw,    f, sr, N, false);
+    double sawBlep  = aliasEnergy(WaveShape::Saw,    f, sr, N, true);
+    double sqrNaive = aliasEnergy(WaveShape::Square, f, sr, N, false);
+    double sqrBlep  = aliasEnergy(WaveShape::Square, f, sr, N, true);
+    // PolyBLEP should remove a large majority of the fold-back energy.
+    check(sawBlep < sawNaive * 0.5, "blep cuts saw alias >50%");
+    check(sqrBlep < sqrNaive * 0.5, "blep cuts sqr alias >50%");
+  }
 
   std::printf("ok\n");
   return 0;
