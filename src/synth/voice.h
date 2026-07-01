@@ -175,7 +175,8 @@ inline float voiceSampleBuf(Voice& v, const int16_t* buf, int len,
       // Varispeed (tape): one cursor, pitch and speed coupled.
       rawSample = (float)sampleRead(buf, len, v.samplePos);
       v.samplePos += pitch;
-      if (v.samplePos >= (float)len) v.samplePos -= (float)len;
+      while (v.samplePos >= (float)len) v.samplePos -= (float)len;
+      while (v.samplePos < 0.0f)        v.samplePos += (float)len;  // guard reverse/neg rate
     }
     float filtered = v.filter.process(rawSample);
     s = filtered * e1 * v.vel * ampMod;

@@ -143,6 +143,19 @@ static void noteOn(char key, int semitone, uint8_t velocity) {
   int midi = synth::noteToMidi(semitone, g_octave);
   int i    = synth::allocVoice(g_voices, N_VOICES, ++g_noteAge);
   synth::Voice& v = g_voices[i];
+  // Stealing a still-gated voice? Release its MIDI note first, or the evicted
+  // note hangs on external gear (the gate-release loop matches on key, which is
+  // about to be overwritten, so it could never send this note-off).
+#if defined(SYNTH_USB_MIDI) || defined(SYNTH_BLE_MIDI)
+  if (v.active && v.key) {
+#ifdef SYNTH_USB_MIDI
+    usbMidi.sendNoteOff(v.midi, 0, 1);
+#endif
+#ifdef SYNTH_BLE_MIDI
+    MIDI.sendNoteOff(v.midi, 0, 1);
+#endif
+  }
+#endif
   v.active   = true;
   v.key      = key;
   v.midi     = midi;
@@ -345,7 +358,21 @@ void loop() {
     // r = record a mic sample; ` (esc key) = panic, kill all voices
     else if (c == 'r') { recordSample(); }
     else if (c == '`') {
-      for (int i = 0; i < N_VOICES; i++) { g_voices[i].active = false; g_voices[i].key = 0; }
+      for (int i = 0; i < N_VOICES; i++) {
+        // Release each still-gated voice's MIDI note so panic doesn't leave
+        // notes hanging on external gear (releasing tails already sent theirs).
+#if defined(SYNTH_USB_MIDI) || defined(SYNTH_BLE_MIDI)
+        if (g_voices[i].active && g_voices[i].key) {
+#ifdef SYNTH_USB_MIDI
+          usbMidi.sendNoteOff(g_voices[i].midi, 0, 1);
+#endif
+#ifdef SYNTH_BLE_MIDI
+          MIDI.sendNoteOff(g_voices[i].midi, 0, 1);
+#endif
+        }
+#endif
+        g_voices[i].active = false; g_voices[i].key = 0;
+      }
       redraw("panic");
     }
   }
