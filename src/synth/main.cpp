@@ -72,6 +72,14 @@ static constexpr int      AMP   = 14000;  // amplitude headroom — keep analog 
 static int16_t g_buf[CHUNK];
 
 static int     g_octave = 4;              // base octave, clamp 1..7
+
+// Idle screen blanking. Kill the backlight after inactivity to save battery.
+// NOT sleep — light-sleep disrupts USB flash/boot; MCU + audio keep running and
+// any key restores the backlight instantly.
+static constexpr unsigned long IDLE_BLANK_MS = 30000;   // 30 s to backlight-off
+static unsigned long g_lastActivityMs = 0;
+static uint8_t       g_brightFull      = 0;    // captured at boot (begin() sets it)
+static bool          g_screenBlanked   = false;
 static uint8_t g_vol    = 128;            // 0..255 (speaker output)
 
 // Waveform state
@@ -350,6 +358,8 @@ void setup() {
   M5.Speaker.begin();
   cardputer::volume(g_vol);
   g_seq.sampleRate = SR;   // clock math needs the real engine rate, not the default
+  g_brightFull     = cardputer::brightness();   // remember boot brightness for un-blank
+  g_lastActivityMs = millis();
 #ifdef SYNTH_BLE_MIDI
   MIDI.begin(MIDI_CHANNEL_OMNI);
 #endif
@@ -381,6 +391,20 @@ void loop() {
   for (char c : nowPressed)
     if (!heldContains(g_prevPressed, c)) justPressed.push_back(c);
   g_prevPressed = nowPressed;
+
+  // --- idle screen blanking: backlight off after IDLE_BLANK_MS of no keys; any
+  // key (incl. Fn) restores it. Backlight only — no sleep, audio keeps running.
+  {
+    bool activity = !nowPressed.empty() || cardputer::fnHeld();
+    unsigned long now = millis();
+    if (activity) {
+      g_lastActivityMs = now;
+      if (g_screenBlanked) { cardputer::brightness(g_brightFull); g_screenBlanked = false; }
+    } else if (!g_screenBlanked && now - g_lastActivityMs > IDLE_BLANK_MS) {
+      cardputer::brightness(0);
+      g_screenBlanked = true;
+    }
+  }
 
   // --- Fn combos: arp controls. Checked (and consumed from justPressed)
   // BEFORE normal key handling — 'a'/'s' would otherwise also fire as a note
