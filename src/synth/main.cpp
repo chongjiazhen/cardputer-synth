@@ -42,6 +42,7 @@
 #include "voicealloc.h"
 #include "mixer.h"
 #include "arp.h"
+#include "sequencer.h"
 #include <cmath>
 #include <vector>
 #include <algorithm>
@@ -123,6 +124,11 @@ static unsigned long    g_lastArpTime   = 0;
 static char             g_arpCurrentKey = 0;     // key char of the sounding arp voice, 0=none
 static int              g_arpCurrentMidi = 0;
 static std::vector<std::pair<int,char>> g_arpNotes;   // (midi, key) sorted low->high
+
+// Step sequencer. Clocked in renderChunk() (sample-accurate); the render gate
+// free-runs while g_seq.running so rests still advance the clock.
+static synth::Sequencer g_seq;
+static char             g_seqCurKeys[synth::SEQ_MAX_TRACKS] = {0};  // sounding key per track, 0=none
 static constexpr unsigned ARP_MIN_MS = 50;
 static constexpr unsigned ARP_MAX_MS = 1000;
 
@@ -158,9 +164,10 @@ static void redraw(const char* lastNote) {
     M5.Display.printf("\nARP %s %ums", synth::arpModeName(g_arp.mode), g_arpIntervalMs);
 }
 
-// Allocate a voice for a key press at a semitone + velocity (0..127).
-static void noteOn(char key, int semitone, uint8_t velocity) {
-  int midi = synth::noteToMidi(semitone, g_octave);
+// MIDI-native note-on: the single trigger path. `key` is the voice-tracking
+// handle for note-off (findVoiceByKey). Callers holding a MIDI number (arp,
+// sequencer) use this directly; semitone+octave callers go via noteOn() below.
+static void noteOnMidi(char key, int midi, uint8_t velocity) {
   int i    = synth::allocVoice(g_voices, N_VOICES, ++g_noteAge);
   synth::Voice& v = g_voices[i];
   // Stealing a still-gated voice? Release its MIDI note first, or the evicted
@@ -214,11 +221,42 @@ static void noteOn(char key, int semitone, uint8_t velocity) {
   g_lastVel  = v.vel;
 }
 
+// Semitone+octave shim over the MIDI-native path. Keyboard callers use this;
+// it applies the current g_octave. (0..11 semitone + velocity 0..127.)
+static void noteOn(char key, int semitone, uint8_t velocity) {
+  noteOnMidi(key, synth::noteToMidi(semitone, g_octave), velocity);
+}
+
 // Render one CHUNK: sum all active voices, apply the per-voice SVF filter
 // (now inside voiceSample), the global vibrato LFO + pitch bend, and the
 // soft limiter on the mix. No master filter — filtering is per-voice.
 static void renderChunk() {
   uint32_t t0 = micros();
+  // Step sequencer: advance the clock by one block. On a step boundary, release
+  // each track's previous note and trigger its new step. (MIDI-out per step is a
+  // TODO — mirror the arp's usbMidi.sendNoteOn/Off if you want external gear.)
+  int seqStep = synth::seqAdvance(g_seq, (int)CHUNK);
+  if (seqStep >= 0) {
+    for (int t = 0; t < synth::SEQ_MAX_TRACKS; t++) {
+      synth::Track& tr = g_seq.tracks[t];
+      if (tr.mute) continue;
+      if (g_seqCurKeys[t]) {                     // release previous step's voice
+        int vi = synth::findVoiceByKey(g_voices, N_VOICES, g_seqCurKeys[t]);
+        if (vi >= 0) {
+          g_voices[vi].env1.gateOff();
+          g_voices[vi].env2.gateOff();
+          g_voices[vi].key = 0;
+        }
+        g_seqCurKeys[t] = 0;
+      }
+      synth::Step& st = tr.steps[seqStep];
+      if (st.gate) {
+        char key = (char)(0x01 + t);             // synthetic per-track voice handle
+        noteOnMidi(key, st.note, st.vel);
+        g_seqCurKeys[t] = key;
+      }
+    }
+  }
   for (size_t i = 0; i < CHUNK; i++) {
     float vibSemi  = g_vibratoDepth * synth::VIB_MAX_SEMITONES * sinf((float)g_lfoPhase);
     float vibRatio = 1.0f + vibSemi * 0.0577623f;
@@ -311,6 +349,7 @@ void setup() {
 #endif
   M5.Speaker.begin();
   cardputer::volume(g_vol);
+  g_seq.sampleRate = SR;   // clock math needs the real engine rate, not the default
 #ifdef SYNTH_BLE_MIDI
   MIDI.begin(MIDI_CHANNEL_OMNI);
 #endif
@@ -503,12 +542,11 @@ void loop() {
         size_t idx = synth::arpStep(g_arp, g_arpNotes.size());
         char key   = g_arpNotes[idx].second;
         int  midi  = g_arpNotes[idx].first;
-        int  semi  = synth::keyToSemitone(key);
 
         stopArpVoice();   // release the previous arp step's note first
 
         uint8_t vel = synth::tiltVelocity(g_tiltFwd);
-        noteOn(key, semi, vel);
+        noteOnMidi(key, midi, vel);   // arp holds true MIDI; skip the semitone shim
         g_arpCurrentKey  = key;
         g_arpCurrentMidi = midi;
 #ifdef SYNTH_USB_MIDI
@@ -517,7 +555,7 @@ void loop() {
 #ifdef SYNTH_BLE_MIDI
         MIDI.sendNoteOn(midi, vel, 1);
 #endif
-        snprintf(g_lastLabel, sizeof(g_lastLabel), "%s%d", synth::semitoneName(semi), g_octave);
+        snprintf(g_lastLabel, sizeof(g_lastLabel), "%s%d", synth::semitoneName(midi % 12), midi / 12 - 1);
         redraw(g_lastLabel);
       }
     }
@@ -556,7 +594,7 @@ void loop() {
   }
 
   // --- keep the speaker fed while the voice is sounding (incl. release tail) ---
-  while (anyVoiceActive() && M5.Speaker.isPlaying(0) < 2) {
+  while ((anyVoiceActive() || g_seq.running) && M5.Speaker.isPlaying(0) < 2) {
     renderChunk();
   }
 
