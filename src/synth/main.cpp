@@ -355,6 +355,15 @@ void setup() {
   usbMidiTransport.setStringDescriptor("Cardputer Synth");
   usbMidi.begin(MIDI_CHANNEL_OMNI);
 #endif
+  // Match the speaker hardware rate to our render rate. Left at M5's default,
+  // playRaw() resamples our 32 kHz stream to the codec rate (linear interp),
+  // injecting level-proportional, note-dependent imaging: audible harshness on
+  // a mathematically clean sine. Configuring the rate removes the resample stage.
+  {
+    auto sc = M5.Speaker.config();
+    sc.sample_rate = SR;
+    M5.Speaker.config(sc);
+  }
   M5.Speaker.begin();
   cardputer::volume(g_vol);
   g_seq.sampleRate = SR;   // clock math needs the real engine rate, not the default
