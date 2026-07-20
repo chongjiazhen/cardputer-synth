@@ -84,6 +84,7 @@ static uint8_t g_vol    = 128;            // 0..255 (speaker output)
 
 // Waveform state
 static synth::WaveShape g_wave = synth::WaveShape::Sine;
+static synth::BassEnh    g_bass;   // missing-fundamental low-note lift (Fn+b toggle)
 
 // Per-voice filter defaults (runtime, ',' / '.' keys modify cutoff;
 // '6' / '7' modify resonance). Applied to new voices on note-on.
@@ -275,7 +276,7 @@ static void renderChunk() {
         ? synth::voiceSampleBuf(g_voices[vch], g_sampleBuf, g_sampleLen,
                                 (float)g_bendRatio, vibRatio, (double)SR, g_samplerGrain)
         : synth::voiceSample(g_voices[vch], g_wave,
-                             (float)g_bendRatio, vibRatio, (double)SR);
+                             (float)g_bendRatio, vibRatio, (double)SR, g_bass);
     g_buf[i] = synth::mixToInt16(bus, 1.0f, AMP);
     g_lfoPhase += g_lfoInc;
     if (g_lfoPhase >= TWO_PI) g_lfoPhase -= TWO_PI;
@@ -435,6 +436,10 @@ void loop() {
       g_arp.mode = synth::nextArpMode(g_arp.mode);
       synth::arpReset(g_arp);
       redraw("-");
+    }
+    if (consume('b')) {
+      g_bass.on = !g_bass.on;
+      redraw(g_bass.on ? "BASS+" : "BASS-");
     }
     if (consume('-')) {
       if (g_arpIntervalMs < ARP_MAX_MS) g_arpIntervalMs += 10;

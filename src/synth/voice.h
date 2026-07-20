@@ -7,6 +7,7 @@
 #include "filter.h"
 #include "lfo.h"
 #include "modmatrix.h"
+#include "bassenh.h"
 
 namespace synth {
 
@@ -56,7 +57,7 @@ static constexpr int FILTER_DECIM = 16;
 // `bendRatio` and `vibRatio` are external pitch modifiers (IMU).
 inline float voiceSample(Voice& v, WaveShape wave,
                           float bendRatio, float vibRatio,
-                          double sampleRate) {
+                          double sampleRate, const BassEnh& be) {
   if (!v.active) return 0.0f;
 
   // Step envelopes and LFOs
@@ -108,6 +109,9 @@ inline float voiceSample(Voice& v, WaveShape wave,
   float inc = v.phaseInc * bendRatio * vibRatio * pitchRatio;
   float dt  = inc / TWO_PI_F;
   float oscOut = osc(wave, v.phase, dt) * shapeGain(wave);
+  // Missing-fundamental bass lift for low notes, before filter + amp so the
+  // added harmonics get shaped and released with the note.
+  oscOut = bassEnhApply(oscOut, v.phase, bassEnhGain(be, bassEnhF0(v.phaseInc, sampleRate)));
   float filtered = v.filter.process(oscOut);
   float s = filtered * e1 * v.vel * ampMod;
 
