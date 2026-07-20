@@ -1,0 +1,33 @@
+# Normalize all text to LF in the repository, and check it out as LF on every
+# platform. The engine is developed on Windows but built by PlatformIO/g++ and
+# read on Linux hosts; a CRLF checkout makes host/build.sh fail to exec and
+# produces noisy whole-file diffs when a file is touched on the other OS.
+* text=auto eol=lf
+
+# Shell scripts MUST be LF - CRLF breaks the shebang line.
+*.sh text eol=lf
+
+# Sources and config: explicit, so a future binary-looking extension can't be
+# misdetected by the text=auto heuristic.
+*.c    text eol=lf
+*.h    text eol=lf
+*.cpp  text eol=lf
+*.hpp  text eol=lf
+*.ino  text eol=lf
+*.md   text eol=lf
+*.ini  text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.py   text eol=lf
+
+# Binaries: never touch, never diff as text.
+*.bin  binary
+*.exe  binary
+*.elf  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.wav  binary
+*.raw  binary
+*.zip  binary
